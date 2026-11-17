@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.4.1]
+
+- Gate whole-item merge on completion evidence for every plan phase, including explicit ticket plan paths and single-file plans.
+- Require new execution commits rather than counting earlier plan commits as implementation success.
+- Pass complete ticket metadata to workers; pin bundled skill discovery to avoid older installed skill shadowing.
+- Add exclusive repository ownership across manual runs, loops and merges; reject overlapping Pi sessions.
+- Terminate Unix worker process groups with TERM/KILL escalation; bound adapter execution and propagate loop cancellation.
+- Record Git merge success separately before remote backlog completion; retain evidence if remote completion fails.
+
 ## [0.4.0]
 
 - Parallel Pi subprocess workers with isolated per-item worktrees and per-stage model routing.

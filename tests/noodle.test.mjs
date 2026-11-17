@@ -149,7 +149,7 @@ test("manual commands create worktree and record history", async () => {
   await h.run("review 1");
   assert.match(h.notes.at(-1), /No branch noodle\/1 to review/);
   await h.run("run 1");
-  assert.match(h.sent[1][0], /^\/skill:noodle-execute Backlog item #1: fix login\nWorktree: .*\.noodle\/worktrees\/1 \(branch noodle\/1, base main\)/);
+  assert.match(h.sent[1][0], /^\/skill:noodle-execute Backlog item #1: fix login[\s\S]*Worktree: .*\.noodle\/worktrees\/1 \(branch noodle\/1, base main\)/);
   assert.deepEqual(h.sent[1][1], { expandPromptTemplates: true });
   await h.run('merge #1');
   assert.match(h.notes.at(-1),/#1 is running/);
@@ -163,6 +163,18 @@ test("manual commands create worktree and record history", async () => {
   fs.writeFileSync(path.join(wt, "fix.txt"), "x\n");
   execFileSync("git", ["-C", wt, "add", "-A"]);
   execFileSync("git", ["-C", wt, "commit", "-qm", "fix"]);
+  fs.writeFileSync(path.join(wt,'shared-plan.md'),'- [ ] NOODLE_PHASE_COMPLETE\n');
+  execFileSync('git',['-C',wt,'add','shared-plan.md']);
+  execFileSync('git',['-C',wt,'commit','-qm','plan']);
+  const backlogPath=path.join(root,'todos.md');
+  fs.writeFileSync(backlogPath,fs.readFileSync(backlogPath,'utf8').replace('fix login','fix login plans/shared.md'));
+  fs.mkdirSync(path.join(wt,'plans'),{recursive:true});
+  fs.renameSync(path.join(wt,'shared-plan.md'),path.join(wt,'plans/shared.md'));
+  execFileSync('git',['-C',wt,'add','-A']);execFileSync('git',['-C',wt,'commit','-qm','move plan']);
+  await h.run('merge #1');
+  assert.match(h.notes.at(-1),/incomplete phases/);
+  fs.writeFileSync(path.join(wt,'plans/shared.md'),'- [x] NOODLE_PHASE_COMPLETE\n');
+  execFileSync('git',['-C',wt,'commit','-qam','finish plan']);
   await h.run("merge #1");
   assert.match(h.notes.at(-1), /Merged noodle\/1/);
   assert.match(fs.readFileSync(path.join(root, "todos.md"), "utf8"), /1\. \[x\] fix login/);

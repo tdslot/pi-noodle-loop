@@ -40,13 +40,16 @@ pi --no-extensions -e ./pi-noodle --skill ./pi-noodle/skills
 ## Execution and safety
 
 - Branch `noodle/<id>`, worktree `.noodle/worktrees/<id>` created by the extension, reused by plan/execute/review stages.
-- Loop stages run as `pi -p` subprocesses. Child extension discovery is disabled to prevent recursive orchestrators and duplicate command conflicts. Built-in tools and skills remain available; extension-provided tools such as pi-subagents are not loaded in these subprocesses.
+- `.noodle/owner.lock` grants exclusive repository ownership for mutation-capable operations. Other Pi sessions must wait. A crash may leave a stale lock: inspect its `owner.json` and verify the owner is no longer running before removing it; locks are never stolen automatically.
+- Planned tasks merge only when every phase file contains a checked `- [x] NOODLE_PHASE_COMPLETE` marker and no unchecked markers. Existing plans without markers fail closed; add completion evidence after verification. An overview uses sibling `phase-*.md` files; single-file plans keep all markers in that file.
+- Execute must create a new commit; earlier planning commits cannot satisfy its success check. Full ticket metadata is included in worker prompts.
+- Loop stages run as `pi -p` subprocesses. Child extension discovery is disabled to prevent recursive orchestrators and duplicate command conflicts. Built-in tools and skills remain available; extension-provided tools such as pi-subagents are not loaded in these subprocesses. Skill discovery is restricted to this package's bundled skills; arbitrary parent-only skills are not guaranteed available in loop children.
 - Scheduler and workers use separate model invocations. Each worker commits only in its worktree. Scheduler only proposes stages.
 - Merge queue is serialized. Staged main-checkout changes, a dirty tracked main checkout (except unstaged `todos.md`) or dirty worker checkout blocks merging. Conflicts are aborted and recorded; branches/worktrees retained for inspection. Empty branches are not considered completed work.
 - Backlog item becomes done only after merge, not after implementation.
 - `.noodle/mise.json`: backlog, plan paths, item branches, active workers, available slots, routing and schedulable skills. `.noodle/history.jsonl`: stage/merge results. `.noodle/logs/`: worker logs. Runtime directory self-gitignored.
 - Scheduler decisions are model judgments, not dependency proofs. Use conservative concurrency for related items.
-- Loop state is in memory, not restart-resumable. Committed branches, worktrees, history and logs survive. Session shutdown aborts the loop.
+- Loop state is in memory, not restart-resumable. Committed branches, worktrees, history and logs survive. Session shutdown aborts and drains the loop. Unix workers use process-group TERM followed by KILL after one second; adapter commands have a 60-second timeout and loop cancellation. Windows currently terminates only the direct child, not its entire process tree.
 - Logs can include source/task content; treat them as private. Do not put secrets in task descriptions.
 
 ## Routing
