@@ -1,0 +1,14 @@
+{
+  "name": "pi-noodle-loop",
+  "version": "0.1.0",
+  "description": "Supervised Noodle-style backlog loop for Pi: /noodle status | add | plan | run",
+  "keywords": ["pi-package", "pi", "backlog", "agent", "worktree"],
+  "license": "MIT",
+  "author": "tdslot",
+  "repository": "github:tdslot/pi-noodle-loop",
+  "type": "module",
+  "files": ["extensions", "README.md", "CHANGELOG.md"],
+  "scripts": { "test": "node --test tests/" },
+  "pi": { "extensions": ["./extensions/noodle.ts"] },
+  "peerDependencies": { "@earendil-works/pi-coding-agent": "*" }
+}
