@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import {Repo,acquireOwnership,planComplete,stagePrompt,run} from '../extensions/noodle.ts';
+import {Repo,acquireOwnership,planComplete,stagePrompt,run,scheduleField,modelIdentity,resolveModelIdentity} from '../extensions/noodle.ts';
 const tmp=()=>fs.mkdtempSync(path.join(os.tmpdir(),'noodle-safety-'));
 test('repository ownership excludes another operation and releases idempotently',()=>{
  const repo=new Repo(tmp());const release=acquireOwnership(repo);
@@ -29,4 +29,18 @@ test('timeout escalates for TERM-resistant process',async()=>{
  const t=Date.now();
  const r=await run(process.execPath,['-e','process.on("SIGTERM",()=>{});setInterval(()=>{},1000)'],{cwd:tmp(),timeoutMs:150});
  assert.notEqual(r.code,0);assert.ok(Date.now()-t<4000);
+});
+
+test('CRLF schedule metadata and review model identities',()=>{
+ assert.equal(scheduleField('---\r\nname: x\r\nschedule: "After execute"\r\n---\r\n'),'After execute');
+ assert.equal(modelIdentity('provider/model:high'),modelIdentity('provider/model:low'));
+ const models=[{provider:'p',id:'model'},{provider:'q',id:'other'}];
+ assert.equal(resolveModelIdentity('model:high',models),'p/model');
+ assert.equal(resolveModelIdentity('p/model:low',models),'p/model');
+ assert.throws(()=>resolveModelIdentity('mod',models),/unambiguous/);
+ assert.throws(()=>resolveModelIdentity('model',[...models,{provider:'q',id:'model'}]),/unambiguous/);
+ const literalSuffix=[{provider:'p',id:'foo'},{provider:'p',id:'foo:high'}];
+ assert.equal(resolveModelIdentity('p/foo:high',literalSuffix),'p/foo:high');
+ assert.equal(resolveModelIdentity('p/foo:high:high',literalSuffix),'p/foo:high');
+ assert.equal(resolveModelIdentity('foo:high',literalSuffix),'p/foo:high');
 });

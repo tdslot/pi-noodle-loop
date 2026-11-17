@@ -125,6 +125,7 @@ function harness(root, extra = {}) {
   const notes = [];
   mod.default({ registerCommand: (n, c) => (cmd = c), on: (e, h) => (hooks[e] = h), sendUserMessage: (m, o) => sent.push([m, o]) });
   const skills = ["noodle-plan", "noodle-execute", "noodle-review"].map((name) => ({ name, filePath: path.join(skillsDir, name, "SKILL.md") }));
+  skills.push({name:'domain-example',description:'Domain test guidance',filePath:path.join(skillsDir,'noodle-testing/SKILL.md')});
   const ctx = {
     cwd: root,
     hasUI: false,
@@ -198,6 +199,7 @@ test("loop: parallel stages, per-stage model routing, merge on PASS", async () =
 
   const calls = fs.readFileSync(path.join(dir, "calls.log"), "utf8");
   assert.match(calls, /--model strong\/model .*\/skill:noodle-execute Backlog item #1/);
+  assert.ok(calls.includes(`--skill ${path.join(skillsDir,'noodle-testing/SKILL.md')}`),'parent domain skill path missing from child');
   assert.match(calls, /--model fast\/model .*\/skill:noodle-execute Backlog item #2/);
   assert.match(calls, /--model review\/model .*\/skill:noodle-review Backlog item #1/);
   const hist = new mod.Repo(root).history(20);
@@ -265,5 +267,22 @@ test('loop refuses completed items and permits standalone skill stages', async (
  assert.ok(hist.some(e=>e.id==='1' && e.ok===false && e.error==='unknown or completed item'));
  assert.ok(hist.some(e=>e.id==='-' && e.skill==='noodle-plan' && e.ok===true));
  assert.equal(await new mod.Repo(root).hasBranch('1'),false);
+ } finally {delete process.env.NOODLE_PI;}
+});
+
+
+test('matching review model fails closed instead of self-review', async()=>{
+ const {root}=gitRepo();const dir=fs.mkdtempSync(path.join(os.tmpdir(),'fakepi-'));
+ process.env.NOODLE_PI=fakePi(dir);
+ fs.writeFileSync(path.join(dir,'next'),'NEXT: noodle-execute 1\nNEXT: noodle-review 1\nNEXT: idle\n');
+ fs.writeFileSync(path.join(root,'.noodle.json'),JSON.stringify({routing:{default:'same/model:high','noodle-review':'same/model:low'}}));
+ const h=harness(root);await h.run('add test');
+ try {
+  await h.run('loop 3 --auto --merge');
+  const hist=new mod.Repo(root).history();
+  assert.ok(hist.some(e=>e.skill==='noodle-review' && e.ok===false && e.error.includes('Independent review')));
+  assert.ok(!hist.some(e=>e.skill==='merge'));
+  const calls=fs.readFileSync(path.join(dir,'calls.log'),'utf8');
+  assert.ok(!calls.includes('/skill:noodle-review'));
  } finally {delete process.env.NOODLE_PI;}
 });

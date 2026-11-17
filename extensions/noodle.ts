@@ -74,7 +74,7 @@ export function parseNdjson(out: string): Item[] {
 
 /** `schedule:` from SKILL.md frontmatter; one-line and folded (`>`/`|`) values. */
 export function scheduleField(skillMd: string): string | undefined {
-	const fm = /^---\n([\s\S]*?)\n---/.exec(skillMd)?.[1];
+	const fm = /^---\n([\s\S]*?)\n---/.exec(skillMd.replace(/\r\n/g, "\n"))?.[1];
 	const m = fm && /^schedule:[ \t]*(.*)$/m.exec(fm);
 	if (!m) return undefined;
 	let v = m[1].trim();
@@ -95,6 +95,16 @@ export function nextDirectives(text: string): Next[] | null {
 	const all = [...text.matchAll(re)];
 	if (!all.length) return null;
 	return all.filter((m) => m[1].toLowerCase() !== "idle").map((m) => ({ skill: m[2], id: m[3], ...(m[4] && { model: m[4] }) }));
+}
+
+export const modelIdentity = (model: string) => model.replace(/:(off|minimal|low|medium|high|xhigh|max)$/, "");
+export function resolveModelIdentity(spec: string, models: readonly { provider: string; id: string }[]): string {
+ // Match Pi precedence: literal IDs may themselves end in a thinking-level suffix.
+ const exact = models.filter(m => `${m.provider}/${m.id}` === spec || m.id === spec);
+ const id = modelIdentity(spec);
+ const matches = exact.length ? exact : models.filter(m => `${m.provider}/${m.id}` === id || m.id === id);
+ if (matches.length !== 1) throw new Error(`Use an unambiguous available model ID, not a fuzzy alias: ${spec}`);
+ return `${matches[0].provider}/${matches[0].id}`;
 }
 
 export const verdict = (text: string) => [...text.matchAll(/^\s*NOODLE_VERDICT:\s*(PASS|CONTESTED|REJECT)\s*$/gm)].at(-1)?.[1];
@@ -124,6 +134,7 @@ export const schedulePrompt = (backlogSource: string, misePath: string, mise: { 
 		"- Use history: don't repeat a completed phase; repeat execute for remaining phases; an item that failed twice gets split or descheduled. After a merge conflict, leave the item for the human.",
 		"- Parallel stages only for independent items (no shared files, types, or contracts).",
 		"- Prefer the cheapest model that can do the stage. Override the routing default only when the stage clearly needs it.",
+		"- noodle-review must use a known model different from the successful execute model. Select configured routing.noodle-review; if unavailable, report the routing blocker instead of scheduling self-review.",
 		"",
 		"Output a table: item, skill, why now (cite the rule or schedule field), dependencies, risk.",
 		"Flag items too vague to act on and propose a rewrite.",
@@ -351,6 +362,10 @@ export default function (pi: ExtensionAPI) {
 	let mergeChain = Promise.resolve();
 
 	const skillsOf = (ctx: ExtensionCommandContext) => ctx.getSystemPromptOptions?.().skills ?? [];
+ const childSkillArgs = (ctx: ExtensionCommandContext) => {
+  const bundled = new Set(fs.readdirSync(path.join(PKG, "skills")));
+  return skillsOf(ctx).filter(s => !bundled.has(s.name)).flatMap(s => ["--skill", s.filePath]);
+ };
 	const status = (ctx: ExtensionCommandContext, text?: string) => ctx.hasUI && ctx.ui.setStatus("noodle", text);
 
 	async function buildMise(ctx: ExtensionCommandContext, repo: Repo, backlog: Backlog, free: number) {
@@ -375,6 +390,7 @@ export default function (pi: ExtensionAPI) {
 			recent_history: repo.history(),
 			task_types,
 			routing: backlog.cfg.routing ?? {},
+   available_skills: skillsOf(ctx).map(s => ({ name: s.name, description: s.description, path: s.filePath })),
 		};
 		fs.writeFileSync(path.join(repo.dir, "mise.json"), JSON.stringify(mise, null, 2));
 		return mise;
@@ -410,15 +426,20 @@ export default function (pi: ExtensionAPI) {
 		if (item && next.skill === "noodle-review" && !(await repo.hasBranch(item.id))) return repo.record({ ...next, ok: false, error: "no branch to review" });
 		const wt = item ? await repo.worktree(item.id, base) : undefined;
 		const plan = item && (item.plan ?? repo.findPlan(item.id));
-		const model = next.model ?? cfg.routing?.[next.skill] ?? cfg.routing?.default;
-		const args = ["-p", "--no-session", "--no-extensions", "--no-skills", "--skill", path.join(PKG, "skills"), ...(model ? ["--model", model] : []), stagePrompt(next.skill, item && { ...item, ...(plan && { plan }) }, wt, backlog.source)];
+		const model = next.model ?? cfg.routing?.[next.skill] ?? cfg.routing?.default ?? (ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined);
+  const available = ctx.modelRegistry?.getAvailable();
+  const identity = model ? (available ? resolveModelIdentity(model, available) : modelIdentity(model)) : undefined;
+  const implementation = [...repo.history(1000)].reverse().find(e => e.id === next.id && e.skill === "noodle-execute" && e.ok);
+  const independent = !!identity && !!implementation?.modelIdentity && identity !== implementation.modelIdentity;
+  if (next.skill === "noodle-review" && !independent) return repo.record({ ...next, ok: false, error: "Independent review requires a known model different from the successful implementation model; configure routing.noodle-review." });
+		const args = ["-p", "--no-session", "--no-extensions", "--no-skills", "--skill", path.join(PKG, "skills"), ...childSkillArgs(ctx), ...(model ? ["--model", model] : []), stagePrompt(next.skill, item && { ...item, ...(plan && { plan }) }, wt, backlog.source)];
 		const log = path.join(repo.dir, "logs", `${Date.now()}-${next.skill}-${next.id === "-" ? "standalone" : safeId(next.id)}.log`);
 		const before = wt ? (await git(wt.path, "rev-parse", "HEAD")).out.trim() : "";
 		const r = await run(PI(), args, { cwd: wt?.path ?? repo.root, signal, timeoutMs: (cfg.timeoutMinutes ?? 60) * 60_000, log });
 		const v = next.skill === "noodle-review" ? verdict(r.out) : undefined;
 		if (next.skill === "noodle-review" && plan && wt && !planComplete(wt.path, plan)) return repo.record({ ...next, ok: false, error: "plan has incomplete phases" });
 		const ok = r.code === 0 && !signal.aborted && (next.skill !== "noodle-review" || v === "PASS") && (next.skill !== "noodle-execute" || !item || (await git(wt!.path, "rev-parse", "HEAD")).out.trim() !== before);
-		repo.record({ ...next, ...(model && { model }), ok, ...(v && { verdict: v }), log, summary: r.out.trim().slice(-400) });
+		repo.record({ ...next, ...(model && { model }), ...(identity && { modelIdentity: identity }), ok, ...(v && { verdict: v }), log, summary: r.out.trim().slice(-400) });
 		if (ok && item && v === "PASS" && opts.merge) {
 			const err = await merge(repo, backlog, item.id, base);
 			ctx.ui.notify(err ? `noodle: merge #${item.id} failed: ${err}` : `noodle: merged ${repo.branch(item.id)}`, err ? "warning" : "info");

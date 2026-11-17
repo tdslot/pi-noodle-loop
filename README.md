@@ -43,7 +43,7 @@ pi --no-extensions -e ./pi-noodle --skill ./pi-noodle/skills
 - `.noodle/owner.lock` grants exclusive repository ownership for mutation-capable operations. Other Pi sessions must wait. A crash may leave a stale lock: inspect its `owner.json` and verify the owner is no longer running before removing it; locks are never stolen automatically.
 - Planned tasks merge only when every phase file contains a checked `- [x] NOODLE_PHASE_COMPLETE` marker and no unchecked markers. Existing plans without markers fail closed; add completion evidence after verification. An overview uses sibling `phase-*.md` files; single-file plans keep all markers in that file.
 - Execute must create a new commit; earlier planning commits cannot satisfy its success check. Full ticket metadata is included in worker prompts.
-- Loop stages run as `pi -p` subprocesses. Child extension discovery is disabled to prevent recursive orchestrators and duplicate command conflicts. Built-in tools and skills remain available; extension-provided tools such as pi-subagents are not loaded in these subprocesses. Skill discovery is restricted to this package's bundled skills; arbitrary parent-only skills are not guaranteed available in loop children.
+- Loop stages run as `pi -p` subprocesses. Child extension discovery is disabled to prevent recursive orchestrators and duplicate command conflicts. Built-in tools and skills remain available; extension-provided tools such as pi-subagents are not loaded in these subprocesses. Bundled skills are pinned first; additional loaded parent skill paths are forwarded explicitly to workers, without forwarding extension code. Domain skill guidance is available even when its extension tools are not; workers must report missing required tools.
 - Scheduler and workers use separate model invocations. Each worker commits only in its worktree. Scheduler only proposes stages.
 - Merge queue is serialized. Staged main-checkout changes, a dirty tracked main checkout (except unstaged `todos.md`) or dirty worker checkout blocks merging. Conflicts are aborted and recorded; branches/worktrees retained for inspection. Empty branches are not considered completed work.
 - Backlog item becomes done only after merge, not after implementation.
@@ -68,7 +68,7 @@ Project `.noodle.json` (optional):
 }
 ```
 
-Use model identifiers from `pi --list-models`; no credentials in this file. Scheduler may propose `NEXT: noodle-execute 42 @provider/model`. Explicit stage model overrides routing, then skill routing, then default. Omitted model uses child Pi's configured default.
+Use model identifiers from `pi --list-models`; no credentials in this file. Scheduler may propose `NEXT: noodle-execute 42 @provider/model`. Explicit stage model overrides routing, then skill routing, then default. Omitted worker model uses the parent's current model when available. Exact model IDs are validated against Pi's available registry; fuzzy aliases are rejected for workers. Review requires a successful execute with a recorded canonical model identity and a different canonical review identity. Set `routing.noodle-review` explicitly. Different thinking levels of the same model do not count as independent review. Older history without canonical model evidence cannot authorize review/automatic merge; rerun execution with current version.
 
 ## Backlog adapters
 
@@ -109,7 +109,7 @@ Commands run relative to project root. `sync` emits NDJSON objects requiring `id
 
 ## Skills
 
-Bundled `noodle-plan`, `noodle-execute`, `noodle-review` adapt Noodle's process and principles. Any loaded skill with `schedule:` becomes schedulable. Example:
+Bundled `noodle-plan`, `noodle-execute`, `noodle-review`, `noodle-testing` and `noodle-debugging` adapt Noodle's process and principles. Planning records Applicable skills by name/path; execution and review read matching domain guidance. Testing requires bug reproduction and red/green evidence; debugging separates hypotheses from facts and fixes scoped root causes. Manual self-review is not independent evidence. Any loaded skill with `schedule:` becomes schedulable. Example:
 
 ```yaml
 ---

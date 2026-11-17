@@ -32,7 +32,9 @@ Run the project's checks (build, types, tests, lint) in the worktree via absolut
 
 Also check: new behavior has new tests asserting outcomes; runtime checks from the plan were actually performed.
 
-When pi-subagents is available, run each lens as a separate read-only `reviewer` child with fresh context, **on a different model than the one that wrote the code** when possible. Give each the intent, absolute repo/worktree path, base and branch names plus the exact `git -C <path> diff <base>...<branch>` command (or paste the diff if small), its lens questions, and the output format. Otherwise, apply lenses sequentially yourself.
+The loop requires a separate review invocation on an explicitly known model different from the implementation model. Configure `routing.noodle-review`; missing or matching model blocks review rather than silently falling back. This review invocation is the independent reviewer. Apply the lenses here; if additional reviewer tooling is available, it may provide separate fresh-context lenses, but do not claim tools were used when unavailable.
+
+Read the plan's Applicable skills and relevant installed domain guidance before judging the diff. Self-review in a manual session may produce findings, but is not independent evidence and must not be represented as an independent PASS.
 
 ## 4. Verdict
 

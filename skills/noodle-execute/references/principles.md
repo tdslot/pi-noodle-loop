@@ -4,6 +4,8 @@ Adapted from [poteto/noodle](https://github.com/poteto/noodle) `brain/principles
 
 ## Core
 
+- **Experience first.** Optimize the central user workflow; prefer fewer polished features. Prototype uncertain UI decisions; verify feedback, accessibility, error states and interaction details.
+
 - **Foundational thinking.** Structural decisions (data models, phase order) optimize for option value; code-level decisions optimize for simplicity. Get data structures right before logic; trace every read/write/lookup through them. Bad complexity: one-use helpers, flags for hypothetical needs, "in case we swap X" layers.
 - **Redesign from first principles.** Don't bolt a change onto the old design. Ask "if we built this from scratch with this requirement, what would we build?" Propagate through types, docs, examples so nothing reads as a patch. Think holistically, deliver incrementally.
 - **Subtract before you add.** Remove dead code, unused features, needless abstraction first; then build. Design for observed usage, not speculative edge cases. Simplify prompts too.
@@ -14,13 +16,13 @@ Adapted from [poteto/noodle](https://github.com/poteto/noodle) `brain/principles
 
 - **Boundary discipline.** Validate and handle errors at system boundaries (CLI args, config, external APIs, files). Trust internal typed data; no re-validation. Business logic in pure functions; the shell stays thin.
 - **Make operations idempotent.** Every mutation answers: "what if this runs twice? what if the last run crashed halfway?" Converge to correct state from any start.
-- **Migrate callers, then delete legacy APIs.** Move every caller to the new API, then delete the old one in the same effort. No permanent shims.
+- **Migrate callers, then delete legacy APIs.** For internal APIs with no external compatibility users, and where coordinated breakage is acceptable: inventory and migrate callers, then delete the old path. Preserve documented public compatibility obligations; do not delete APIs relied on by external consumers without an approved migration.
 - **Serialize shared-state mutations.** Concurrent actors on shared files/branches need structural serialization (lockfile, sequential phases, exclusive ownership) or no sharing (separate worktrees). Instructions alone don't prevent races.
 
 ## Verification
 
 - **Prove it works.** Check the real thing, not a proxy (self-reports, mtimes, "it compiles"). Build, run, exercise the actual feature path end to end, test error paths. When verification fails, suspect the observation method first.
-- **Fix root causes.** Reproduce first. Ask "why" until bedrock; fix there, not with guards. Grep for the same pattern elsewhere. After restarts, suspect stale state before code. Own every file you touch: no "pre-existing" excuse for issues in it.
+- **Fix root causes.** Reproduce first. Ask "why" until bedrock; fix there, not with guards. Grep for the same pattern elsewhere. After restarts, suspect stale state before code. Fix the scoped root cause and its necessary affected paths. Report unrelated findings; do not expand the change merely because a file was touched.
 
 ## Delegation
 
