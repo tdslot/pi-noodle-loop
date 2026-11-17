@@ -4,5 +4,11 @@ set -euo pipefail
 gql() { curl -fsS -H "Authorization: $LINEAR_API_KEY" -H 'Content-Type: application/json' --data @- https://api.linear.app/graphql; }
 title=$(jq -r .title)
 team=$(jq -n --arg k "$NOODLE_LINEAR_TEAM" '{query: "query($k: String!) { teams(filter: {key: {eq: $k}}) { nodes { id } } }", variables: {k: $k}}' | gql | jq -er 'if .errors then error(.errors|tojson) else .data.teams.nodes[0].id // error("team not found") end')
-jq -n --arg t "$team" --arg title "$title" '{query: "mutation($i: IssueCreateInput!) { issueCreate(input: $i) { issue { identifier } } }", variables: {i: {teamId: $t, title: $title}}}' |
+label=${NOODLE_LINEAR_LABEL-noodle}
+labels='[]'
+if [ -n "$label" ]; then
+  labels=$(jq -n --arg name "$label" '{query: "query($n: String!) { issueLabels(filter: {name: {eq: $n}}) { nodes { id } } }", variables: {n: $name}}' |
+    gql | jq -ce 'if .errors then error(.errors|tojson) else [.data.issueLabels.nodes[].id] | if length == 0 then error("label not found") else . end end')
+fi
+jq -n --arg t "$team" --arg title "$title" --argjson labels "$labels" '{query: "mutation($i: IssueCreateInput!) { issueCreate(input: $i) { issue { identifier } } }", variables: {i: {teamId: $t, title: $title, labelIds: $labels}}}' |
   gql | jq -er 'if .errors then error(.errors|tojson) else .data.issueCreate.issue.identifier // error("issue creation failed") end'

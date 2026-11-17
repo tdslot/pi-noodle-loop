@@ -98,7 +98,10 @@ export function nextDirectives(text: string): Next[] | null {
 }
 
 export const verdict = (text: string) => [...text.matchAll(/^\s*NOODLE_VERDICT:\s*(PASS|CONTESTED|REJECT)\s*$/gm)].at(-1)?.[1];
-export const safeId = (id: string) => id.replace(/[^A-Za-z0-9._-]/g, "-");
+export const safeId = (id: string) => {
+	if (!/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(id)) throw new Error(`Invalid item ID: ${id}`);
+	return id;
+};
 
 // Scheduler rules adapted from poteto/noodle `schedule` skill (MIT).
 export const schedulePrompt = (backlogSource: string, misePath: string, mise: { free_slots: number }) =>
@@ -203,6 +206,9 @@ export class Repo {
 			const r = (await this.hasBranch(id)) ? await git(this.root, "worktree", "add", p, b) : await git(this.root, "worktree", "add", "-b", b, p, base);
 			if (r.code) throw new Error(`git worktree add failed: ${r.err.trim()}`);
 		}
+		const top = await git(p, "rev-parse", "--show-toplevel");
+		const branch = await git(p, "branch", "--show-current");
+		if (top.code || !top.out.trim() || fs.realpathSync(top.out.trim()) !== fs.realpathSync(p) || branch.out.trim() !== b) throw new Error(`Refusing invalid worktree: ${p}`);
 		return { path: p, branch: b, base };
 	}
 	/** Merge noodle/<id> into base in the main checkout, then remove worktree and branch. */
@@ -212,6 +218,7 @@ export class Repo {
 		if ((await this.base()) !== base) return `main checkout is not on ${base}`;
 		if (!(await this.ahead(id, base))) return `${b} has no commits ahead of ${base}`;
 		if (fs.existsSync(this.wtPath(id)) && (await git(this.wtPath(id), "status", "--porcelain")).out.trim()) return `${b} worktree has uncommitted changes`;
+		if ((await git(this.root, "diff", "--cached", "--name-only")).out.trim()) return "main checkout has staged changes";
 		const dirty = (await git(this.root, "status", "--porcelain", "--untracked-files=no")).out
 			.split("\n")
 			.filter((l) => l.trim() && !l.endsWith("todos.md"));
@@ -360,14 +367,14 @@ export default function (pi: ExtensionAPI) {
 		const cfg = backlog.cfg;
 		const items = await backlog.items();
 		const item = next.id === "-" ? undefined : items.find((i) => i.id === next.id);
-		if (next.id !== "-" && !item) return repo.record({ ...next, ok: false, error: "unknown item" });
+		if (next.id !== "-" && (!item || item.done)) return repo.record({ ...next, ok: false, error: "unknown or completed item" });
 		const base = await repo.base();
 		if (item && next.skill === "noodle-review" && !(await repo.hasBranch(item.id))) return repo.record({ ...next, ok: false, error: "no branch to review" });
 		const wt = item ? await repo.worktree(item.id, base) : undefined;
 		const plan = item && (item.plan ?? repo.findPlan(item.id));
 		const model = next.model ?? cfg.routing?.[next.skill] ?? cfg.routing?.default;
 		const args = ["-p", "--no-session", "--no-extensions", "--skill", path.join(PKG, "skills"), ...(model ? ["--model", model] : []), stagePrompt(next.skill, item && { ...item, ...(plan && { plan }) }, wt, backlog.source)];
-		const log = path.join(repo.dir, "logs", `${Date.now()}-${next.skill}-${safeId(next.id)}.log`);
+		const log = path.join(repo.dir, "logs", `${Date.now()}-${next.skill}-${next.id === "-" ? "standalone" : safeId(next.id)}.log`);
 		const r = await run(PI(), args, { cwd: wt?.path ?? repo.root, signal, timeoutMs: (cfg.timeoutMinutes ?? 60) * 60_000, log });
 		const v = next.skill === "noodle-review" ? verdict(r.out) : undefined;
 		const ok = r.code === 0 && !signal.aborted && (next.skill !== "noodle-review" || v === "PASS") && (next.skill !== "noodle-execute" || !item || (await repo.ahead(item.id, base)) > 0);
@@ -384,60 +391,61 @@ export default function (pi: ExtensionAPI) {
 		let why = "stopped";
 		let schedule = true;
 		try {
-		while (!l.ctl.signal.aborted) {
-			const free = Math.min(opts.parallel - inflight.size, l.left);
-			if (schedule && free > 0) {
-				schedule = false;
-				const historyBefore = repo.history(100).length;
-				const mise = await buildMise(ctx, repo, backlog, free);
-				if (!mise.backlog.length && !inflight.size) {
-					why = "backlog empty";
-					break;
-				}
-				status(ctx, `noodle: scheduling (${inflight.size} running, ${l.left} left)`);
-				const model = backlog.cfg.routing?.scheduler ?? backlog.cfg.routing?.default;
-				const log = path.join(repo.dir, "logs", `${Date.now()}-schedule.log`);
-				const prompt = schedulePrompt(backlog.source, path.join(repo.dir, "mise.json"), mise);
-				const r = await run(PI(), ["-p", "--no-session", "--no-extensions", ...(model ? ["--model", model] : []), prompt], { cwd: repo.root, signal: l.ctl.signal, timeoutMs: (backlog.cfg.timeoutMinutes ?? 60) * 60_000, log });
-				if (l.ctl.signal.aborted) break;
-				const nexts = nextDirectives(r.out) ?? [];
-				const seen = new Set(l.running.keys());
-				const pick = nexts.filter((n) => {
-					if (!known.has(n.skill) || seen.has(n.id)) return false;
-					seen.add(n.id);
-					return true;
-				}).slice(0, free);
-				if (pick.length) {
-					const desc = pick.map((n) => `${n.skill} #${n.id}${n.model ? ` @${n.model}` : ""}`).join(", ");
-					if (!opts.auto && !(ctx.hasUI && (await ctx.ui.confirm("Noodle loop", `Run ${desc}?`)))) {
-						why = ctx.hasUI ? "declined" : `needs confirmation for ${desc}; use --auto`;
+			while (!l.ctl.signal.aborted) {
+				const free = Math.min(opts.parallel - inflight.size, l.left);
+				if (schedule && free > 0) {
+					schedule = false;
+					const historyBefore = fs.existsSync(path.join(repo.dir, "history.jsonl")) ? fs.statSync(path.join(repo.dir, "history.jsonl")).size : 0;
+					const mise = await buildMise(ctx, repo, backlog, free);
+					if (!mise.backlog.length && !inflight.size) {
+						why = "backlog empty";
 						break;
 					}
-					for (const n of pick) {
-						l.left--;
-						l.running.set(n.id, n);
-						const p = runStage(ctx, repo, backlog, n, opts, l.ctl.signal)
-							.catch((e) => repo.record({ ...n, ok: false, error: String(e) }))
-							.finally(() => {
-								l.running.delete(n.id);
-								inflight.delete(n.id);
-							});
-						inflight.set(n.id, p);
+					status(ctx, `noodle: scheduling (${inflight.size} running, ${l.left} left)`);
+					const model = backlog.cfg.routing?.scheduler ?? backlog.cfg.routing?.default;
+					const log = path.join(repo.dir, "logs", `${Date.now()}-schedule.log`);
+					const prompt = schedulePrompt(backlog.source, path.join(repo.dir, "mise.json"), mise);
+					const r = await run(PI(), ["-p", "--no-session", "--no-extensions", ...(model ? ["--model", model] : []), prompt], { cwd: repo.root, signal: l.ctl.signal, timeoutMs: (backlog.cfg.timeoutMinutes ?? 60) * 60_000, log });
+					if (l.ctl.signal.aborted) break;
+					if (r.code !== 0) throw new Error(`scheduler failed (see ${log})`);
+					const nexts = nextDirectives(r.out) ?? [];
+					const seen = new Set(l.running.keys());
+					const pick = nexts.filter((n) => {
+						if (!known.has(n.skill) || seen.has(n.id)) return false;
+						seen.add(n.id);
+						return true;
+					}).slice(0, free);
+					if (pick.length) {
+						const desc = pick.map((n) => `${n.skill} #${n.id}${n.model ? ` @${n.model}` : ""}`).join(", ");
+						if (!opts.auto && !(ctx.hasUI && (await ctx.ui.confirm("Noodle loop", `Run ${desc}?`)))) {
+							why = ctx.hasUI ? "declined" : `needs confirmation for ${desc}; use --auto`;
+							break;
+						}
+						for (const n of pick) {
+							l.left--;
+							l.running.set(n.id, n);
+							const p = runStage(ctx, repo, backlog, n, opts, l.ctl.signal)
+								.catch((e) => repo.record({ ...n, ok: false, error: String(e) }))
+								.finally(() => {
+									l.running.delete(n.id);
+									inflight.delete(n.id);
+								});
+							inflight.set(n.id, p);
+						}
+					} else if (!inflight.size) {
+						if ((fs.existsSync(path.join(repo.dir, "history.jsonl")) ? fs.statSync(path.join(repo.dir, "history.jsonl")).size : 0) !== historyBefore) { schedule = true; continue; }
+						why = r.code ? `scheduler failed (see ${log})` : /NEXT:/i.test(r.out) ? "nothing actionable" : `scheduler gave no NEXT line (see ${log})`;
+						break;
 					}
-				} else if (!inflight.size) {
-					if (repo.history(100).length !== historyBefore) { schedule = true; continue; }
-					why = r.code ? `scheduler failed (see ${log})` : /NEXT:/i.test(r.out) ? "nothing actionable" : `scheduler gave no NEXT line (see ${log})`;
+				}
+				if (!inflight.size) {
+					why = "stage limit reached";
 					break;
 				}
+				status(ctx, `noodle: ${[...l.running.values()].map((n) => `${n.skill} #${n.id}`).join(", ")} (${l.left} left)`);
+				await Promise.race(inflight.values());
+				schedule = true;
 			}
-			if (!inflight.size) {
-				why = "stage limit reached";
-				break;
-			}
-			status(ctx, `noodle: ${[...l.running.values()].map((n) => `${n.skill} #${n.id}`).join(", ")} (${l.left} left)`);
-			await Promise.race(inflight.values());
-			schedule = true;
-		}
 		} finally {
 			// Scheduler/adapter failure must not abandon mutation-capable workers.
 			if (inflight.size) l.ctl.abort();
@@ -496,8 +504,10 @@ export default function (pi: ExtensionAPI) {
 				}
 				if (cmd === "merge") {
 					if (!rest[0]) return ctx.ui.notify("Usage: /noodle merge <id>", "warning");
-					const err = await merge(repo, backlog, rest[0], await repo.base());
-					return ctx.ui.notify(err ? `Merge failed: ${err}` : `Merged ${repo.branch(rest[0])} and marked #${rest[0]} done`, err ? "warning" : "info");
+					const id = rest[0].replace(/^#/, "");
+					if (loop?.running.has(id) || (manual?.root === ctx.cwd && manual.id === id)) return ctx.ui.notify(`#${id} is running; stop or wait before merging.`, "warning");
+					const err = await merge(repo, backlog, id, await repo.base());
+					return ctx.ui.notify(err ? `Merge failed: ${err}` : `Merged ${repo.branch(id)} and marked #${id} done`, err ? "warning" : "info");
 				}
 				if (cmd === "loop") {
 					if (!ctx.isIdle()) return ctx.ui.notify("Agent busy; wait until idle.", "warning");
@@ -544,7 +554,7 @@ export default function (pi: ExtensionAPI) {
 				if (item && loop?.running.has(item.id)) return ctx.ui.notify(`#${item.id} is running in the loop`, "warning");
 				const wt = item ? await repo.worktree(item.id, await repo.base()) : undefined;
 				const plan = item && (item.plan ?? repo.findPlan(item.id));
-				manual = { skill, id, root: ctx.cwd };
+				manual = { skill, id: item?.id ?? id, root: ctx.cwd };
 				pi.sendUserMessage(stagePrompt(skill, item && { ...item, ...(plan && { plan }) }, wt, backlog.source), { expandPromptTemplates: true });
 			} catch (e) {
 				ctx.ui.notify(`noodle: ${e instanceof Error ? e.message : e}`, "error");

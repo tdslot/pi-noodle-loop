@@ -24,6 +24,11 @@ test("todos.md parse/add/markDone", () => {
   assert.equal(mod.markDone(c, "12"), c);
 });
 
+test('item IDs reject path traversal and avoid sanitized-name collisions', () => {
+  for (const id of ['..', '.', '../x', 'a/b', 'a b', '-']) assert.throws(()=>mod.safeId(id),/Invalid item ID/);
+  assert.equal(mod.safeId('ENG-123'), 'ENG-123');
+});
+
 test("adapter NDJSON contract", () => {
   assert.deepEqual(mod.parseNdjson('{"id":7,"title":"x","status":"done","tags":["a"]}\n\n{"id":"ENG-1","title":"y"}\n'), [
     { id: "7", title: "x", status: "done", tags: ["a"], done: true },
@@ -61,6 +66,8 @@ function gitRepo() {
 test("Repo worktree is idempotent; merge is safe", async () => {
   const { root, g } = gitRepo();
   const repo = new mod.Repo(root);
+  fs.mkdirSync(path.join(repo.dir,'worktrees/invalid'),{recursive:true});
+  await assert.rejects(repo.worktree('invalid','main'),/Refusing invalid worktree/);
   const wt = await repo.worktree("1", "main");
   assert.equal(wt.branch, "noodle/1");
   assert.deepEqual(await repo.worktree("1", "main"), wt);
@@ -68,6 +75,11 @@ test("Repo worktree is idempotent; merge is safe", async () => {
   execFileSync("git", ["-C", wt.path, "add", "-A"]);
   execFileSync("git", ["-C", wt.path, "commit", "-qm", "b"]);
   assert.equal(await repo.ahead("1", "main"), 1);
+  fs.writeFileSync(path.join(root,'todos.md'),'local staged user text\n');
+  g('add','todos.md');
+  assert.match(await repo.merge('1','main'),/staged changes/);
+  g('reset','--','todos.md');
+  fs.unlinkSync(path.join(root,'todos.md'));
 
   // Conflict: main and branch both change a.txt.
   const wt2 = await repo.worktree("2", "main");
@@ -139,6 +151,8 @@ test("manual commands create worktree and record history", async () => {
   await h.run("run 1");
   assert.match(h.sent[1][0], /^\/skill:noodle-execute Backlog item #1: fix login\nWorktree: .*\.noodle\/worktrees\/1 \(branch noodle\/1, base main\)/);
   assert.deepEqual(h.sent[1][1], { expandPromptTemplates: true });
+  await h.run('merge #1');
+  assert.match(h.notes.at(-1),/#1 is running/);
   await h.settle();
   assert.deepEqual(new mod.Repo(root).history().map((e) => [e.skill, e.id, e.ok]), [["noodle-execute", "1", true]]);
   await h.run("do bogus 1");
@@ -149,7 +163,7 @@ test("manual commands create worktree and record history", async () => {
   fs.writeFileSync(path.join(wt, "fix.txt"), "x\n");
   execFileSync("git", ["-C", wt, "add", "-A"]);
   execFileSync("git", ["-C", wt, "commit", "-qm", "fix"]);
-  await h.run("merge 1");
+  await h.run("merge #1");
   assert.match(h.notes.at(-1), /Merged noodle\/1/);
   assert.match(fs.readFileSync(path.join(root, "todos.md"), "utf8"), /1\. \[x\] fix login/);
 });
@@ -222,4 +236,22 @@ test('aborting process waits for child close, not AbortError', async () => {
   ctl.abort();
   await child;
   assert.ok(fs.existsSync(marker),'released worker before child exited');
+});
+
+
+test('loop refuses completed items and permits standalone skill stages', async () => {
+ const {root}=gitRepo();
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'fakepi-'));
+ process.env.NOODLE_PI=fakePi(dir);
+ fs.writeFileSync(path.join(dir,'next'),'NEXT: noodle-execute 1\nNEXT: noodle-plan -\nNEXT: idle\n');
+ const h=harness(root);
+ await h.run('add completed');await h.run('add open');
+ const file=path.join(root,'todos.md');fs.writeFileSync(file,mod.markDone(fs.readFileSync(file,'utf8'),'1'));
+ try {
+ await h.run('loop 3 --auto');
+ const hist=new mod.Repo(root).history();
+ assert.ok(hist.some(e=>e.id==='1' && e.ok===false && e.error==='unknown or completed item'));
+ assert.ok(hist.some(e=>e.id==='-' && e.skill==='noodle-plan' && e.ok===true));
+ assert.equal(await new mod.Repo(root).hasBranch('1'),false);
+ } finally {delete process.env.NOODLE_PI;}
 });

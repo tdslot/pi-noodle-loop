@@ -42,7 +42,7 @@ pi --no-extensions -e ./pi-noodle --skill ./pi-noodle/skills
 - Branch `noodle/<id>`, worktree `.noodle/worktrees/<id>` created by the extension, reused by plan/execute/review stages.
 - Loop stages run as `pi -p` subprocesses. Child extension discovery is disabled to prevent recursive orchestrators and duplicate command conflicts. Built-in tools and skills remain available; extension-provided tools such as pi-subagents are not loaded in these subprocesses.
 - Scheduler and workers use separate model invocations. Each worker commits only in its worktree. Scheduler only proposes stages.
-- Merge queue is serialized. A dirty tracked main checkout (except `todos.md`) or dirty worker checkout blocks merging. Conflicts are aborted and recorded; branches/worktrees retained for inspection. Empty branches are not considered completed work.
+- Merge queue is serialized. Staged main-checkout changes, a dirty tracked main checkout (except unstaged `todos.md`) or dirty worker checkout blocks merging. Conflicts are aborted and recorded; branches/worktrees retained for inspection. Empty branches are not considered completed work.
 - Backlog item becomes done only after merge, not after implementation.
 - `.noodle/mise.json`: backlog, plan paths, item branches, active workers, available slots, routing and schedulable skills. `.noodle/history.jsonl`: stage/merge results. `.noodle/logs/`: worker logs. Runtime directory self-gitignored.
 - Scheduler decisions are model judgments, not dependency proofs. Use conservative concurrency for related items.
@@ -86,7 +86,7 @@ Default source: project-root `todos.md`, Noodle numbered checkbox format:
 | Jira Cloud | `JIRA_URL`, `JIRA_EMAIL`, `JIRA_TOKEN`; optional `NOODLE_JIRA_JQL`, `NOODLE_JIRA_DONE` (default `Done`); creation requires `NOODLE_JIRA_PROJECT`, optional `NOODLE_JIRA_TYPE` |
 | Linear | `LINEAR_API_KEY`, `NOODLE_LINEAR_TEAM`; optional `NOODLE_LINEAR_LABEL` (default `noodle`, empty selects all) |
 
-Store credentials in your shell/secret manager, not Git. Existing label must exist on GitHub. Jira transition must be available for each issue. Sources currently return a bounded first page (GitHub/Linear 200, Jira 100); narrow filters for larger queues. Live Jira/Linear mutations require testing against your project's workflows.
+Store credentials in your shell/secret manager, not Git. Existing label must exist on GitHub and Linear; Linear creation attaches that label so newly added items remain discoverable. Jira transition must be available for each issue. Sources currently return a bounded first page (GitHub/Linear 200, Jira 100); narrow filters for larger queues. Live Jira/Linear mutations require testing against your project's workflows.
 
 Custom adapter contract:
 
@@ -128,7 +128,7 @@ shellcheck -S warning adapters/*/*
 npm pack --dry-run
 ```
 
-Tests cover parsing, adapter failures, real Git worktrees/conflicts, parallel workers, routing, serialized merges and confirmation gating. Real Pi smoke test also exercised execute, review and automatic merge in a disposable repository.
+Tests cover parsing, adapter failures, real Git worktrees/conflicts, parallel workers, routing, serialized merges and confirmation gating. Real Pi smoke tests exercised two concurrent execute workers, both reviews and serialized automatic merges in a disposable repository.
 
 ## Credits / license
 
