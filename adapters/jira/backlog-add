@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# stdin: {"title": "..."}; prints the new issue key. Env: NOODLE_JIRA_PROJECT, NOODLE_JIRA_TYPE (default Task).
+set -euo pipefail
+jq --arg p "$NOODLE_JIRA_PROJECT" --arg t "${NOODLE_JIRA_TYPE:-Task}" \
+  '{fields: {project: {key: $p}, issuetype: {name: $t}, summary: .title, labels: ["noodle"]}}' |
+  curl -fsS -u "$JIRA_EMAIL:$JIRA_TOKEN" -H 'Content-Type: application/json' -X POST --data @- \
+    "$JIRA_URL/rest/api/3/issue" | jq -er '.key // error("issue creation failed")'

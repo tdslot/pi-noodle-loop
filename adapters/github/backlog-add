@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# stdin: {"title": "..."}; prints the new issue number.
+set -euo pipefail
+title=$(jq -r .title)
+label=${NOODLE_GH_LABEL-noodle}
+url=$(gh issue create ${NOODLE_GH_REPO:+--repo "$NOODLE_GH_REPO"} --title "$title" --body "Created by /noodle add." ${label:+--label "$label"})
+echo "${url##*/}"

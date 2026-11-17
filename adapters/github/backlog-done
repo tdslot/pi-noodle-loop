@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# $1: issue number. Closes it after the noodle branch merged.
+set -euo pipefail
+gh issue close ${NOODLE_GH_REPO:+--repo "$NOODLE_GH_REPO"} "$1" --comment "Merged by noodle (branch noodle/$1)."

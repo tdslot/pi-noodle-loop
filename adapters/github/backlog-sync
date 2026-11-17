@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Noodle backlog adapter: GitHub Issues via gh CLI. NDJSON, one open issue per line.
+# Env: NOODLE_GH_LABEL (default "noodle"; empty = all open issues), NOODLE_GH_REPO (default: current repo).
+set -euo pipefail
+label=${NOODLE_GH_LABEL-noodle}
+gh issue list ${NOODLE_GH_REPO:+--repo "$NOODLE_GH_REPO"} --state open ${label:+--label "$label"} \
+  --limit 200 --json number,title,labels,body |
+  jq -c '.[] | {id: (.number|tostring), title, tags: [.labels[].name], body: (.body // "")[0:2000]}'

@@ -1,69 +1,86 @@
 /**
- * Noodle-style backlog loop for Pi. Adapted from poteto/noodle (MIT).
- * Backlog: <cwd>/todos.md ("1. [ ] task", "<!-- next-id: N -->"). Runtime state: <cwd>/.noodle/.
+ * Noodle-style skill loop for Pi. Adapted from poteto/noodle (MIT).
  *
- * /noodle status              open items, loop state
- * /noodle add <text>          append item
- * /noodle plan                scheduler pass over the mise (also written to .noodle/mise.json)
- * /noodle plan|run|review <id>  load noodle-plan / noodle-execute / noodle-review for an item
- * /noodle do <skill> <id|->   run any skill (e.g. your own schedulable skill) for an item
- * /noodle loop [n] [--auto]   schedule -> stage -> schedule ..., max n stages, fresh session each;
- *                             asks before each stage unless --auto. Never merges.
- * /noodle stop                end the loop
+ * Backlog: <cwd>/todos.md ("1. [ ] task", "<!-- next-id: N -->") or a backlog adapter (.noodle.json).
+ * Runtime state: <cwd>/.noodle/ (self-gitignored): mise.json, history.jsonl, logs/, worktrees/<id>.
+ * Every item gets branch noodle/<id> in worktree .noodle/worktrees/<id>, created here, not by the agent.
  *
- * Skills with a `schedule:` frontmatter field are offered to the scheduler as task types.
- * ponytail: one stage at a time, no merge queue, no backlog adapters; parallelism lives
- * inside noodle-execute via pi-subagents.
+ * /noodle status | add <text> | plan [id] | run <id> | review <id> | do <skill> <id|-> | merge <id>
+ * /noodle loop [n] [--parallel k] [--auto] [--merge] | stop | init <github|jira|linear>
+ *
+ * Loop: scheduler and stages run as `pi -p` subprocesses (up to k in parallel, model per stage from
+ * .noodle.json routing or the scheduler's @model). --merge merges an item's branch after a PASS review,
+ * one merge at a time. Without --merge, branches wait for /noodle merge <id>.
+ * ponytail: loop state is in memory (dies with the Pi process); add a persisted order queue if loops
+ * need to survive restarts.
  */
 
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { fileURLToPath } from "node:url";
+import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+
+// ---------- pure helpers (tested) ----------
 
 const ITEM = /^(\d+)\. \[( |x)\] (.+)$/i;
 const NEXT_ID = /<!-- next-id: (\d+) -->/;
 const TEMPLATE = "# Todos\n\n<!-- next-id: 1 -->\n\n## Inbox\n";
 
-export type Item = { id: number; done: boolean; text: string; plan?: string };
-type Current = { kind: "schedule" } | { kind: "stage"; skill: string; id: string };
-type Loop = { remaining: number; auto: boolean };
+export type Item = { id: string; title: string; done?: boolean; plan?: string; [k: string]: unknown };
+export type Next = { skill: string; id: string; model?: string };
+export type Config = {
+	routing?: Record<string, string>;
+	adapters?: { backlog?: { sync?: string; add?: string; done?: string } };
+	timeoutMinutes?: number;
+};
 
 export function parse(md: string): Item[] {
 	return md.split("\n").flatMap((line) => {
 		const m = ITEM.exec(line.trim());
 		if (!m) return [];
 		const plan = /\bplans\/\S+\.md\b/.exec(m[3])?.[0];
-		return [{ id: Number(m[1]), done: m[2] !== " ", text: m[3], ...(plan && { plan }) }];
+		return [{ id: m[1], title: m[3], done: m[2] !== " ", ...(plan && { plan }) }];
 	});
 }
 
-export function add(md: string, text: string): { md: string; id: number } {
+export function add(md: string, text: string): { md: string; id: string } {
 	if (!md.trim()) md = TEMPLATE;
-	const ids = parse(md).map((i) => i.id);
+	const ids = parse(md).map((i) => Number(i.id));
 	const id = Math.max(Number(NEXT_ID.exec(md)?.[1] ?? 1), ...ids.map((n) => n + 1));
 	const line = `${id}. [ ] ${text.replace(/\s+/g, " ").trim()}`;
 	md = NEXT_ID.test(md) ? md.replace(NEXT_ID, `<!-- next-id: ${id + 1} -->`) : md;
 	if (!/^## Inbox$/m.test(md)) md = `${md.trimEnd()}\n\n## Inbox\n`;
-	// Insert after the last line of the Inbox section.
 	const lines = md.split("\n");
 	const start = lines.findIndex((l) => l === "## Inbox");
 	let end = start + 1;
 	while (end < lines.length && !lines[end].startsWith("## ")) end++;
 	while (end > start + 1 && !lines[end - 1].trim()) end--;
 	lines.splice(end, 0, line);
-	return { md: lines.join("\n").replace(/\n*$/, "\n"), id };
+	return { md: lines.join("\n").replace(/\n*$/, "\n"), id: String(id) };
 }
 
-/** `schedule:` from SKILL.md frontmatter; supports one-line and folded (`>`/`|`) values. */
+export const markDone = (md: string, id: string) => md.replace(new RegExp(`^(\\s*${id}\\. \\[) (\\])`, "m"), "$1x$2");
+
+/** NDJSON from a backlog adapter `sync`; only id and title are required (Noodle contract). */
+export function parseNdjson(out: string): Item[] {
+	return out.split("\n").flatMap((l) => {
+		if (!l.trim()) return [];
+		const o = JSON.parse(l);
+		if (o.id == null || !o.title) throw new Error(`adapter item needs id and title: ${l}`);
+		return [{ ...o, id: String(o.id), done: o.status === "done" }];
+	});
+}
+
+/** `schedule:` from SKILL.md frontmatter; one-line and folded (`>`/`|`) values. */
 export function scheduleField(skillMd: string): string | undefined {
 	const fm = /^---\n([\s\S]*?)\n---/.exec(skillMd)?.[1];
 	const m = fm && /^schedule:[ \t]*(.*)$/m.exec(fm);
 	if (!m) return undefined;
 	let v = m[1].trim();
-	if (v === ">" || v === "|" || v === ">-" || v === "|-" || v === "") {
-		const rest = fm.slice(m.index + m[0].length + 1).split("\n");
+	if (["", ">", "|", ">-", "|-"].includes(v)) {
 		const body: string[] = [];
-		for (const l of rest) {
+		for (const l of fm.slice(m.index + m[0].length + 1).split("\n")) {
 			if (!/^\s+\S/.test(l)) break;
 			body.push(l.trim());
 		}
@@ -72,18 +89,24 @@ export function scheduleField(skillMd: string): string | undefined {
 	return v.replace(/^["']|["']$/g, "").trim() || undefined;
 }
 
-/** Last `NEXT: <skill> <id>` / `NEXT: idle` line of the scheduler reply. */
-export function nextDirective(text: string): { skill: string; id: string } | "idle" | null {
-	const all = [...text.matchAll(/^\s*`?NEXT:\s*(idle|([a-z0-9][a-z0-9-]*)\s+(#?[\w-]+))`?\s*$/gim)];
-	const m = all.at(-1);
-	if (!m) return null;
-	return m[1].toLowerCase() === "idle" ? "idle" : { skill: m[2], id: m[3].replace(/^#/, "") };
+/** All `NEXT: <skill> <id> [@model]` lines; [] for `NEXT: idle`; null if the scheduler gave none. */
+export function nextDirectives(text: string): Next[] | null {
+	const re = /^\s*`?NEXT:\s*(idle|([a-z0-9][a-z0-9-]*)\s+#?([\w.-]+)(?:\s+@(\S+?))?)`?\s*$/gim;
+	const all = [...text.matchAll(re)];
+	if (!all.length) return null;
+	return all.filter((m) => m[1].toLowerCase() !== "idle").map((m) => ({ skill: m[2], id: m[3], ...(m[4] && { model: m[4] }) }));
 }
 
+export const verdict = (text: string) => [...text.matchAll(/^\s*NOODLE_VERDICT:\s*(PASS|CONTESTED|REJECT)\s*$/gm)].at(-1)?.[1];
+export const safeId = (id: string) => {
+	if (!/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(id)) throw new Error(`Invalid item ID: ${id}`);
+	return id;
+};
+
 // Scheduler rules adapted from poteto/noodle `schedule` skill (MIT).
-export const schedulePrompt = (file: string, misePath: string, mise: unknown) =>
+export const schedulePrompt = (backlogSource: string, misePath: string, mise: { free_slots: number }) =>
 	[
-		`Act as the Noodle scheduler for the backlog in ${file}. Read the repository and plan files as needed.`,
+		`Act as the Noodle scheduler for the backlog (${backlogSource}). Read the repository and plan files as needed.`,
 		"Scheduling only: do not edit files, do not load task skills, do not start planning or implementing.",
 		`Mise (also in ${misePath}):`,
 		"```json",
@@ -91,174 +114,451 @@ export const schedulePrompt = (file: string, misePath: string, mise: unknown) =>
 		"```",
 		"",
 		"Rules:",
-		"- task_types are the schedulable skills; read each `schedule` as prose and use judgment to match it to backlog state and history.",
+		"- task_types are the schedulable skills; read each `schedule` as prose and use judgment against backlog, branches, and history.",
+		"- Item pipeline: noodle-plan (complex items only) -> noodle-execute -> noodle-review -> merge. Merge is done by the loop (--merge, after a PASS review) or the human, never by a stage.",
 		"- One plan at a time: finish the highest-priority planned item end to end before starting another. Shared infrastructure may run alongside.",
 		"- Complex items (multi-file, cross-cutting, ambiguous, or needing an architecture sketch) get noodle-plan first; simple, clear items go to noodle-execute.",
-		"- Items with a plan: schedule remaining unchecked phases.",
-		"- Unmerged noodle/* branches are not on the base branch yet: items that depend on them are blocked until the human merges.",
-		"- Use history: don't repeat a stage that already succeeded; an item that failed twice gets split or descheduled.",
-		"- If nothing is actionable, say so and go idle.",
+		"- Items with a plan: execute the remaining unchecked phases.",
+		"- Never schedule an item listed in `active`. Items whose branch passed review are waiting for merge: skip them.",
+		"- Items that depend on another item's unmerged branch are blocked until it merges.",
+		"- Use history: don't repeat a stage that already succeeded; an item that failed twice gets split or descheduled. After a merge conflict, leave the item for the human.",
+		"- Parallel stages only for independent items (no shared files, types, or contracts).",
+		"- Prefer the cheapest model that can do the stage. Override the routing default only when the stage clearly needs it.",
 		"",
-		"Output a table: order, item, skill, why now (cite the rule or schedule field), dependencies, risk.",
+		"Output a table: item, skill, why now (cite the rule or schedule field), dependencies, risk.",
 		"Flag items too vague to act on and propose a rewrite.",
-		"Last line, exactly one of: `NEXT: <skill> <item-id>` (item-id `-` for no item) or `NEXT: idle`.",
+		`Then up to ${mise.free_slots} final line(s) \`NEXT: <skill> <item-id>\` (append \` @<provider/model>\` to override routing; item-id \`-\` for no item), or one line \`NEXT: idle\`.`,
 	].join("\n");
 
-const ALIASES: Record<string, string> = { plan: "noodle-plan", run: "noodle-execute", review: "noodle-review" };
-const USAGE = "Usage: /noodle status | add <text> | plan [id] | run <id> | review <id> | do <skill> <id|-> | loop [n] [--auto] | stop";
+export const stagePrompt = (skill: string, item: Item | undefined, wt: { path: string; branch: string; base: string } | undefined, source: string) =>
+	[
+		`/skill:${skill}${item ? ` Backlog item #${item.id}: ${item.title}` : ""}`,
+		...(item?.plan ? [`Plan: ${item.plan}`] : []),
+		...(skill === "noodle-review" ? ["End with exactly one machine-readable line (do not translate): NOODLE_VERDICT: PASS, NOODLE_VERDICT: CONTESTED, or NOODLE_VERDICT: REJECT."] : []),
+		...(wt
+			? [
+					`Worktree: ${wt.path} (branch ${wt.branch}, base ${wt.base}). It already exists: work and commit only there. Never edit the main checkout.`,
+					`Backlog (${source}) is managed by /noodle: do not edit todos.md or mark the item done; that happens when the branch merges.`,
+				]
+			: []),
+	].join("\n");
 
-export default function (pi: ExtensionAPI) {
-	const dir = (cwd: string) => {
-		const d = path.join(cwd, ".noodle");
-		if (!fs.existsSync(d)) {
-			fs.mkdirSync(d);
-			fs.writeFileSync(path.join(d, ".gitignore"), "*\n");
-		}
-		return d;
-	};
-	const read = <T>(cwd: string, name: string): T | undefined => {
-		try {
-			return JSON.parse(fs.readFileSync(path.join(dir(cwd), name), "utf8"));
-		} catch {
-			return undefined;
-		}
-	};
-	const write = (cwd: string, name: string, v: unknown) =>
-		v === undefined ? fs.rmSync(path.join(dir(cwd), name), { force: true }) : fs.writeFileSync(path.join(dir(cwd), name), JSON.stringify(v, null, 2));
-	const history = (cwd: string) => {
-		const f = path.join(dir(cwd), "history.jsonl");
-		return fs.existsSync(f) ? fs.readFileSync(f, "utf8").trim().split("\n").filter(Boolean).slice(-10).map((l) => JSON.parse(l)) : [];
-	};
+// ---------- process + git ----------
 
-	async function buildMise(ctx: ExtensionCommandContext, md: string) {
-		const git = async (...args: string[]) => (await pi.exec("git", args, { cwd: ctx.cwd, timeout: 10000 })).stdout.split("\n").filter(Boolean);
-		const merged = new Set(await git("branch", "--merged", "HEAD", "--format=%(refname:short)", "--list", "noodle/*"));
-		const branches = (await git("branch", "--format=%(refname:short)", "--list", "noodle/*")).map((name) => ({ name, merged: merged.has(name) }));
-		const skills = ctx.getSystemPromptOptions?.().skills ?? [];
-		const task_types = skills.flatMap((s) => {
-			const schedule = scheduleField(fs.readFileSync(s.filePath, "utf8"));
-			return schedule ? [{ skill: s.name, schedule }] : [];
-		});
-		return { backlog: parse(md).filter((i) => !i.done), branches, recent_history: history(ctx.cwd), task_types };
-	}
+type Res = { code: number; out: string; err: string };
 
-	// Loop stages run in a fresh session, like Noodle's per-order agent sessions.
-	async function send(ctx: ExtensionCommandContext, prompt: string, expand: boolean) {
-		const opts = expand ? { expandPromptTemplates: true } : undefined;
-		if (!read<Loop>(ctx.cwd, "loop.json")) return pi.sendUserMessage(prompt, opts);
-		await ctx.newSession({
-			parentSession: ctx.sessionManager.getSessionFile(),
-			withSession: async (c) => c.sendUserMessage(prompt, opts),
-		});
-	}
-
-	pi.registerCommand("noodle", {
-		description: "Backlog loop: status | add | plan [id] | run <id> | review <id> | do <skill> <id> | loop [n] [--auto] | stop",
-		getArgumentCompletions: (prefix) => {
-			const items = ["status", "add", "plan", "run", "review", "do", "loop", "stop"].filter((s) => s.startsWith(prefix)).map((value) => ({ value, label: value }));
-			return items.length ? items : null;
-		},
-		handler: async (args, ctx) => {
-			const file = path.join(ctx.cwd, "todos.md");
-			const md = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "";
-			const all = parse(md);
-			const open = all.filter((i) => !i.done);
-			const [cmd = "status", ...rest] = args.trim().split(/\s+/);
-			const arg = args.trim().slice(cmd.length).trim();
-			const loop = read<Loop>(ctx.cwd, "loop.json");
-
-			if (cmd === "status") {
-				const lines = open.length ? open.map((i) => `#${i.id} ${i.text}`) : [`No open items in ${file}`];
-				if (loop) lines.push(`Loop: ${loop.remaining} stage(s) left${loop.auto ? ", auto" : ""}`);
-				return ctx.ui.notify(lines.join("\n"), "info");
-			}
-			if (cmd === "add") {
-				if (!arg) return ctx.ui.notify("Usage: /noodle add <text>", "warning");
-				const out = add(md, arg);
-				fs.writeFileSync(file, out.md);
-				return ctx.ui.notify(`Added #${out.id}`, "info");
-			}
-			if (cmd === "stop") {
-				write(ctx.cwd, "loop.json", undefined);
-				return ctx.ui.notify("Loop stopped.", "info");
-			}
-			if (cmd === "loop") {
-				const n = Number(rest.find((r) => /^\d+$/.test(r)) ?? 5);
-				write(ctx.cwd, "loop.json", { remaining: n, auto: rest.includes("--auto") } satisfies Loop);
-				ctx.ui.notify(`Loop started: max ${n} stage(s). /noodle stop to end.`, "info");
-			} else if (!ALIASES[cmd] && cmd !== "do") return ctx.ui.notify(USAGE, "warning");
-			if (!ctx.isIdle()) return ctx.ui.notify("Agent busy; wait until idle.", "warning");
-
-			// Scheduler pass.
-			if (cmd === "loop" || (cmd === "plan" && !rest[0])) {
-				const mise = await buildMise(ctx, md);
-				write(ctx.cwd, "mise.json", mise);
-				if (!mise.backlog.length) {
-					write(ctx.cwd, "loop.json", undefined);
-					return ctx.ui.notify(`No open items in ${file}`, "warning");
-				}
-				write(ctx.cwd, "current.json", { kind: "schedule" } satisfies Current);
-				return send(ctx, schedulePrompt(file, path.join(ctx.cwd, ".noodle/mise.json"), mise), false);
-			}
-
-			// Stage: one skill applied to one item.
-			const skill = cmd === "do" ? rest[0] : ALIASES[cmd];
-			const id = cmd === "do" ? rest[1] : rest[0];
-			if (!skill || !id) return ctx.ui.notify(USAGE, "warning");
-			const known = ctx.getSystemPromptOptions?.().skills?.map((s) => s.name);
-			if (known && !known.includes(skill)) return ctx.ui.notify(`Unknown skill: ${skill}`, "warning");
-			// review also accepts done items: the branch exists after run marks [x].
-			const item = id === "-" ? undefined : (cmd === "run" ? open : all).find((i) => i.id === Number(id));
-			if (id !== "-" && !item) return ctx.ui.notify(`No ${cmd === "run" ? "open " : ""}item #${id}`, "warning");
-			write(ctx.cwd, "current.json", { kind: "stage", skill, id } satisfies Current);
-			const body = item ? ` Backlog item #${item.id}: ${item.text}\nBacklog file: ${file}` : "";
-			await send(ctx, `/skill:${skill}${body}`, true);
-		},
-	});
-
-	// Record finished stages; drive the loop. Every handoff goes through /noodle so it gets a command context.
-	pi.on("agent_settled", async (event, ctx: ExtensionContext) => {
-		const cur = read<Current>(ctx.cwd, "current.json");
-		if (!cur) return;
-		write(ctx.cwd, "current.json", undefined);
-		const reply = lastAssistantText(ctx);
-		if (cur.kind === "stage") {
-			const entry = { ts: new Date().toISOString(), skill: cur.skill, id: cur.id, aborted: event.aborted, summary: reply.slice(-400) };
-			fs.appendFileSync(path.join(dir(ctx.cwd), "history.jsonl"), `${JSON.stringify(entry)}\n`);
-		}
-		const loop = read<Loop>(ctx.cwd, "loop.json");
-		if (!loop) return;
-		const stop = (why: string) => {
-			write(ctx.cwd, "loop.json", undefined);
-			ctx.ui.notify(`Noodle loop stopped: ${why}`, "info");
+export function run(cmd: string, args: string[], o: { cwd: string; input?: string; signal?: AbortSignal; timeoutMs?: number; log?: string }): Promise<Res> {
+	return new Promise((resolve) => {
+		let out = "";
+		let err = "";
+		let done = false;
+		const finish = (code: number) => {
+			if (done) return;
+			done = true;
+			if (o.log) fs.writeFileSync(o.log, `$ ${cmd} ${args.join(" ")}\n${out}\n--- stderr ---\n${err}`);
+			resolve({ code, out, err });
 		};
-		if (event.aborted) return stop("aborted");
-
-		if (cur.kind === "stage") {
-			if (loop.remaining - 1 <= 0) return stop("stage limit reached");
-			write(ctx.cwd, "loop.json", { ...loop, remaining: loop.remaining - 1 });
-			return pi.sendUserMessage("/noodle plan", { expandPromptTemplates: true });
-		}
-		const next = nextDirective(reply);
-		if (next === null) return stop("scheduler gave no NEXT line");
-		if (next === "idle") return stop("nothing actionable");
-		const command = `/noodle do ${next.skill} ${next.id}`;
-		if (!loop.auto) {
-			if (!ctx.hasUI) return stop(`needs confirmation; run ${command} or use --auto`);
-			if (!(await ctx.ui.confirm("Noodle loop", `Run ${command}?`))) return stop("declined");
-		}
-		pi.sendUserMessage(command, { expandPromptTemplates: true });
+		const p = spawn(cmd, args, { cwd: o.cwd, signal: o.signal, timeout: o.timeoutMs });
+		p.stdout.on("data", (d) => (out += d));
+		p.stderr.on("data", (d) => (err += d));
+		p.on("error", (e) => {
+			err += String(e);
+			// Abort emits error before exit. Keep ownership until close drains the process.
+			if (!p.pid) finish(1);
+		});
+		p.stdin.on("error", (e) => { err += String(e); });
+		p.on("close", (code) => finish(code ?? 1));
+		p.stdin.end(o.input ?? "");
 	});
 }
 
-function lastAssistantText(ctx: ExtensionContext): string {
-	const branch = ctx.sessionManager.getBranch();
-	for (let i = branch.length - 1; i >= 0; i--) {
-		const e = branch[i];
-		if (e.type === "message" && e.message.role === "assistant") {
-			const c = e.message.content;
-			return typeof c === "string" ? c : c.flatMap((p) => (p.type === "text" ? [p.text] : [])).join("\n");
+const git = (cwd: string, ...args: string[]) => run("git", args, { cwd });
+const sh = (cwd: string, cmd: string, args: string[] = [], input?: string) => run("sh", ["-c", `${cmd} "$@"`, "sh", ...args], { cwd, input });
+
+export class Repo {
+	readonly root: string;
+	constructor(root: string) {
+		this.root = root;
+	}
+	get dir() {
+		const d = path.join(this.root, ".noodle");
+		fs.mkdirSync(path.join(d, "logs"), { recursive: true });
+		if (!fs.existsSync(path.join(d, ".gitignore"))) fs.writeFileSync(path.join(d, ".gitignore"), "*\n");
+		return d;
+	}
+	branch = (id: string) => `noodle/${safeId(id)}`;
+	wtPath = (id: string) => path.join(this.dir, "worktrees", safeId(id));
+	async base() {
+		return (await git(this.root, "rev-parse", "--abbrev-ref", "HEAD")).out.trim();
+	}
+	async hasBranch(id: string) {
+		return (await git(this.root, "rev-parse", "--verify", "--quiet", `refs/heads/${this.branch(id)}`)).code === 0;
+	}
+	async ahead(id: string, base: string) {
+		return Number((await git(this.root, "rev-list", "--count", `${base}..${this.branch(id)}`)).out.trim() || 0);
+	}
+	/** Idempotent: reuse worktree, reattach existing branch, or branch from base. */
+	async worktree(id: string, base: string) {
+		const p = this.wtPath(id);
+		const b = this.branch(id);
+		if (!fs.existsSync(p)) {
+			await git(this.root, "worktree", "prune");
+			const r = (await this.hasBranch(id)) ? await git(this.root, "worktree", "add", p, b) : await git(this.root, "worktree", "add", "-b", b, p, base);
+			if (r.code) throw new Error(`git worktree add failed: ${r.err.trim()}`);
+		}
+		const top = await git(p, "rev-parse", "--show-toplevel");
+		const branch = await git(p, "branch", "--show-current");
+		if (top.code || !top.out.trim() || fs.realpathSync(top.out.trim()) !== fs.realpathSync(p) || branch.out.trim() !== b) throw new Error(`Refusing invalid worktree: ${p}`);
+		return { path: p, branch: b, base };
+	}
+	/** Merge noodle/<id> into base in the main checkout, then remove worktree and branch. */
+	async merge(id: string, base: string): Promise<string | undefined> {
+		const b = this.branch(id);
+		if (!(await this.hasBranch(id))) return `no branch ${b}`;
+		if ((await this.base()) !== base) return `main checkout is not on ${base}`;
+		if (!(await this.ahead(id, base))) return `${b} has no commits ahead of ${base}`;
+		if (fs.existsSync(this.wtPath(id)) && (await git(this.wtPath(id), "status", "--porcelain")).out.trim()) return `${b} worktree has uncommitted changes`;
+		if ((await git(this.root, "diff", "--cached", "--name-only")).out.trim()) return "main checkout has staged changes";
+		const dirty = (await git(this.root, "status", "--porcelain", "--untracked-files=no")).out
+			.split("\n")
+			.filter((l) => l.trim() && !l.endsWith("todos.md"));
+		if (dirty.length) return `main checkout has uncommitted changes: ${dirty.join(", ")}`;
+		const m = await git(this.root, "merge", "--no-ff", "--no-edit", b);
+		if (m.code) {
+			await git(this.root, "merge", "--abort");
+			return `merge conflict: ${(m.out + m.err).trim().split("\n").slice(-3).join(" ")}`;
+		}
+		// No --force: never discard uncommitted work left in the worktree.
+		await git(this.root, "worktree", "remove", this.wtPath(id));
+		await git(this.root, "branch", "-d", b);
+	}
+	findPlan(id: string) {
+		for (const root of [this.wtPath(id), this.root]) {
+			const dir = path.join(root, "plans");
+			const hit = fs.existsSync(dir) && fs.readdirSync(dir).find((f) => f.startsWith(`${safeId(id)}-`));
+			if (!hit) continue;
+			const p = path.join("plans", hit);
+			return fs.statSync(path.join(root, p)).isDirectory() ? path.join(p, "overview.md") : p;
 		}
 	}
-	return "";
+	history(n = 10) {
+		const f = path.join(this.dir, "history.jsonl");
+		return fs.existsSync(f) ? fs.readFileSync(f, "utf8").trim().split("\n").filter(Boolean).slice(-n).map((l) => JSON.parse(l)) : [];
+	}
+	record(e: Record<string, unknown>) {
+		fs.appendFileSync(path.join(this.dir, "history.jsonl"), `${JSON.stringify({ ts: new Date().toISOString(), ...e })}\n`);
+	}
+}
+
+// ---------- backlog (todos.md or adapter) ----------
+
+export class Backlog {
+	readonly root: string;
+	readonly cfg: Config;
+	constructor(root: string, cfg: Config) {
+		this.root = root;
+		this.cfg = cfg;
+	}
+	get adapter() {
+		return this.cfg.adapters?.backlog;
+	}
+	get file() {
+		return path.join(this.root, "todos.md");
+	}
+	get source() {
+		return this.adapter?.sync ? `adapter: ${this.adapter.sync}` : this.file;
+	}
+	async items(): Promise<Item[]> {
+		if (this.adapter?.sync) {
+			const r = await sh(this.root, this.adapter.sync);
+			if (r.code) throw new Error(`backlog sync failed: ${r.err.trim()}`);
+			return parseNdjson(r.out);
+		}
+		return parse(fs.existsSync(this.file) ? fs.readFileSync(this.file, "utf8") : "");
+	}
+	async add(title: string): Promise<string> {
+		if (this.adapter?.sync) {
+			if (!this.adapter.add) throw new Error("adapter has no add command");
+			const r = await sh(this.root, this.adapter.add, [], JSON.stringify({ title }));
+			if (r.code) throw new Error(`backlog add failed: ${r.err.trim()}`);
+			return r.out.trim();
+		}
+		const out = add(fs.existsSync(this.file) ? fs.readFileSync(this.file, "utf8") : "", title);
+		fs.writeFileSync(this.file, out.md);
+		return out.id;
+	}
+	async done(id: string) {
+		if (this.adapter?.sync) {
+			if (!this.adapter.done) return;
+			const r = await sh(this.root, this.adapter.done, [id]);
+			if (r.code) throw new Error(`backlog done failed: ${r.err.trim()}`);
+			return;
+		}
+		if (fs.existsSync(this.file)) fs.writeFileSync(this.file, markDone(fs.readFileSync(this.file, "utf8"), id));
+	}
+}
+
+export function loadConfig(root: string): Config {
+	const f = path.join(root, ".noodle.json");
+	return fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, "utf8")) : {};
+}
+
+// ---------- extension ----------
+
+const PKG = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const ALIASES: Record<string, string> = { plan: "noodle-plan", run: "noodle-execute", review: "noodle-review" };
+const USAGE =
+	"Usage: /noodle status | add <text> | plan [id] | run <id> | review <id> | do <skill> <id|-> | merge <id> | loop [n] [--parallel k] [--auto] [--merge] | stop | init <github|jira|linear>";
+const PI = () => process.env.NOODLE_PI ?? "pi";
+
+type Loop = { ctl: AbortController; running: Map<string, Next>; left: number; done: Promise<void> };
+
+export default function (pi: ExtensionAPI) {
+	let loop: Loop | undefined;
+	let manual: { skill: string; id: string; root: string } | undefined;
+	let mergeChain = Promise.resolve();
+
+	const skillsOf = (ctx: ExtensionCommandContext) => ctx.getSystemPromptOptions?.().skills ?? [];
+	const status = (ctx: ExtensionCommandContext, text?: string) => ctx.hasUI && ctx.ui.setStatus("noodle", text);
+
+	async function buildMise(ctx: ExtensionCommandContext, repo: Repo, backlog: Backlog, free: number) {
+		const base = await repo.base();
+		const items = (await backlog.items()).filter((i) => !i.done);
+		const enriched = await Promise.all(
+			items.map(async (i) => {
+				const plan = i.plan ?? repo.findPlan(i.id);
+				const branch = (await repo.hasBranch(i.id)) ? { name: repo.branch(i.id), commits_ahead: await repo.ahead(i.id, base) } : undefined;
+				return { ...i, ...(plan && { plan }), ...(branch && { branch }) };
+			}),
+		);
+		const task_types = skillsOf(ctx).flatMap((s) => {
+			const schedule = scheduleField(fs.readFileSync(s.filePath, "utf8"));
+			return schedule ? [{ skill: s.name, schedule }] : [];
+		});
+		const mise = {
+			base,
+			backlog: enriched,
+			active: [...(loop?.running.values() ?? [])],
+			free_slots: free,
+			recent_history: repo.history(),
+			task_types,
+			routing: backlog.cfg.routing ?? {},
+		};
+		fs.writeFileSync(path.join(repo.dir, "mise.json"), JSON.stringify(mise, null, 2));
+		return mise;
+	}
+
+	/** Serialized: one merge at a time against the main checkout. */
+	function merge(repo: Repo, backlog: Backlog, id: string, base: string) {
+		const p = mergeChain.then(async () => {
+			const err = await repo.merge(id, base);
+			if (!err) await backlog.done(id);
+			repo.record({ skill: "merge", id, ok: !err, ...(err && { error: err }) });
+			return err;
+		});
+		mergeChain = p.then(
+			() => undefined,
+			() => undefined,
+		);
+		return p;
+	}
+
+	async function runStage(ctx: ExtensionCommandContext, repo: Repo, backlog: Backlog, next: Next, opts: { merge: boolean }, signal: AbortSignal) {
+		const cfg = backlog.cfg;
+		const items = await backlog.items();
+		const item = next.id === "-" ? undefined : items.find((i) => i.id === next.id);
+		if (next.id !== "-" && (!item || item.done)) return repo.record({ ...next, ok: false, error: "unknown or completed item" });
+		const base = await repo.base();
+		if (item && next.skill === "noodle-review" && !(await repo.hasBranch(item.id))) return repo.record({ ...next, ok: false, error: "no branch to review" });
+		const wt = item ? await repo.worktree(item.id, base) : undefined;
+		const plan = item && (item.plan ?? repo.findPlan(item.id));
+		const model = next.model ?? cfg.routing?.[next.skill] ?? cfg.routing?.default;
+		const args = ["-p", "--no-session", "--no-extensions", "--skill", path.join(PKG, "skills"), ...(model ? ["--model", model] : []), stagePrompt(next.skill, item && { ...item, ...(plan && { plan }) }, wt, backlog.source)];
+		const log = path.join(repo.dir, "logs", `${Date.now()}-${next.skill}-${next.id === "-" ? "standalone" : safeId(next.id)}.log`);
+		const r = await run(PI(), args, { cwd: wt?.path ?? repo.root, signal, timeoutMs: (cfg.timeoutMinutes ?? 60) * 60_000, log });
+		const v = next.skill === "noodle-review" ? verdict(r.out) : undefined;
+		const ok = r.code === 0 && !signal.aborted && (next.skill !== "noodle-review" || v === "PASS") && (next.skill !== "noodle-execute" || !item || (await repo.ahead(item.id, base)) > 0);
+		repo.record({ ...next, ...(model && { model }), ok, ...(v && { verdict: v }), log, summary: r.out.trim().slice(-400) });
+		if (ok && item && v === "PASS" && opts.merge) {
+			const err = await merge(repo, backlog, item.id, base);
+			ctx.ui.notify(err ? `noodle: merge #${item.id} failed: ${err}` : `noodle: merged ${repo.branch(item.id)}`, err ? "warning" : "info");
+		}
+	}
+
+	async function loopBody(ctx: ExtensionCommandContext, repo: Repo, backlog: Backlog, l: Loop, opts: { parallel: number; auto: boolean; merge: boolean }) {
+		const known = new Set(skillsOf(ctx).map((s) => s.name));
+		const inflight = new Map<string, Promise<void>>();
+		let why = "stopped";
+		let schedule = true;
+		try {
+			while (!l.ctl.signal.aborted) {
+				const free = Math.min(opts.parallel - inflight.size, l.left);
+				if (schedule && free > 0) {
+					schedule = false;
+					const historyBefore = fs.existsSync(path.join(repo.dir, "history.jsonl")) ? fs.statSync(path.join(repo.dir, "history.jsonl")).size : 0;
+					const mise = await buildMise(ctx, repo, backlog, free);
+					if (!mise.backlog.length && !inflight.size) {
+						why = "backlog empty";
+						break;
+					}
+					status(ctx, `noodle: scheduling (${inflight.size} running, ${l.left} left)`);
+					const model = backlog.cfg.routing?.scheduler ?? backlog.cfg.routing?.default;
+					const log = path.join(repo.dir, "logs", `${Date.now()}-schedule.log`);
+					const prompt = schedulePrompt(backlog.source, path.join(repo.dir, "mise.json"), mise);
+					const r = await run(PI(), ["-p", "--no-session", "--no-extensions", ...(model ? ["--model", model] : []), prompt], { cwd: repo.root, signal: l.ctl.signal, timeoutMs: (backlog.cfg.timeoutMinutes ?? 60) * 60_000, log });
+					if (l.ctl.signal.aborted) break;
+					if (r.code !== 0) throw new Error(`scheduler failed (see ${log})`);
+					const nexts = nextDirectives(r.out) ?? [];
+					const seen = new Set(l.running.keys());
+					const pick = nexts.filter((n) => {
+						if (!known.has(n.skill) || seen.has(n.id)) return false;
+						seen.add(n.id);
+						return true;
+					}).slice(0, free);
+					if (pick.length) {
+						const desc = pick.map((n) => `${n.skill} #${n.id}${n.model ? ` @${n.model}` : ""}`).join(", ");
+						if (!opts.auto && !(ctx.hasUI && (await ctx.ui.confirm("Noodle loop", `Run ${desc}?`)))) {
+							why = ctx.hasUI ? "declined" : `needs confirmation for ${desc}; use --auto`;
+							break;
+						}
+						for (const n of pick) {
+							l.left--;
+							l.running.set(n.id, n);
+							const p = runStage(ctx, repo, backlog, n, opts, l.ctl.signal)
+								.catch((e) => repo.record({ ...n, ok: false, error: String(e) }))
+								.finally(() => {
+									l.running.delete(n.id);
+									inflight.delete(n.id);
+								});
+							inflight.set(n.id, p);
+						}
+					} else if (!inflight.size) {
+						if ((fs.existsSync(path.join(repo.dir, "history.jsonl")) ? fs.statSync(path.join(repo.dir, "history.jsonl")).size : 0) !== historyBefore) { schedule = true; continue; }
+						why = r.code ? `scheduler failed (see ${log})` : /NEXT:/i.test(r.out) ? "nothing actionable" : `scheduler gave no NEXT line (see ${log})`;
+						break;
+					}
+				}
+				if (!inflight.size) {
+					why = "stage limit reached";
+					break;
+				}
+				status(ctx, `noodle: ${[...l.running.values()].map((n) => `${n.skill} #${n.id}`).join(", ")} (${l.left} left)`);
+				await Promise.race(inflight.values());
+				schedule = true;
+			}
+		} finally {
+			// Scheduler/adapter failure must not abandon mutation-capable workers.
+			if (inflight.size) l.ctl.abort();
+			await Promise.allSettled(inflight.values());
+		}
+		ctx.ui.notify(`Noodle loop stopped: ${why}`, "info");
+	}
+
+	pi.on("session_shutdown", async () => loop?.ctl.abort());
+
+	pi.on("agent_settled", async (event) => {
+		if (!manual) return;
+		new Repo(manual.root).record({ skill: manual.skill, id: manual.id, ok: !event.aborted, manual: true });
+		manual = undefined;
+	});
+
+	pi.registerCommand("noodle", {
+		description: "Noodle skill loop: status | add | plan [id] | run | review | do | merge | loop | stop | init",
+		getArgumentCompletions: (prefix) => {
+			const items = ["status", "add", "plan", "run", "review", "do", "merge", "loop", "stop", "init"].filter((s) => s.startsWith(prefix)).map((value) => ({ value, label: value }));
+			return items.length ? items : null;
+		},
+		handler: async (args, ctx) => {
+			const repo = new Repo(ctx.cwd);
+			const cfg = loadConfig(ctx.cwd);
+			const backlog = new Backlog(ctx.cwd, cfg);
+			const [cmd = "status", ...rest] = args.trim().split(/\s+/);
+			const arg = args.trim().slice(cmd.length).trim();
+
+			try {
+				if (cmd === "status") {
+					const open = (await backlog.items()).filter((i) => !i.done);
+					const lines = open.length ? open.map((i) => `#${i.id} ${i.title}`) : [`No open items (${backlog.source})`];
+					if (loop) lines.push(`Loop: ${[...loop.running.values()].map((n) => `${n.skill} #${n.id}`).join(", ") || "scheduling"}; ${loop.left} stage(s) left`);
+					return ctx.ui.notify(lines.join("\n"), "info");
+				}
+				if (cmd === "add") {
+					if (!arg) return ctx.ui.notify("Usage: /noodle add <text>", "warning");
+					return ctx.ui.notify(`Added #${await backlog.add(arg)}`, "info");
+				}
+				if (cmd === "stop") {
+					if (!loop) return ctx.ui.notify("No loop running.", "info");
+					loop.ctl.abort();
+					return ctx.ui.notify("Stopping loop; running stages are killed.", "info");
+				}
+				if (cmd === "init") {
+					const kind = rest[0];
+					const src = path.join(PKG, "adapters", kind ?? "");
+					if (!kind || !fs.existsSync(src)) return ctx.ui.notify("Usage: /noodle init <github|jira|linear>", "warning");
+					const dst = path.join(ctx.cwd, "adapters", kind);
+					fs.mkdirSync(dst, { recursive: true });
+					for (const f of fs.readdirSync(src)) fs.copyFileSync(path.join(src, f), path.join(dst, f)), fs.chmodSync(path.join(dst, f), 0o755);
+					const cmds = Object.fromEntries(["sync", "add", "done"].map((k) => [k, `adapters/${kind}/backlog-${k}`]));
+					fs.writeFileSync(path.join(ctx.cwd, ".noodle.json"), `${JSON.stringify({ ...cfg, adapters: { ...cfg.adapters, backlog: cmds } }, null, 2)}\n`);
+					return ctx.ui.notify(`Wrote adapters/${kind}/ and .noodle.json. Configure env vars listed in adapters/${kind}/backlog-sync.`, "info");
+				}
+				if (cmd === "merge") {
+					if (!rest[0]) return ctx.ui.notify("Usage: /noodle merge <id>", "warning");
+					const id = rest[0].replace(/^#/, "");
+					if (loop?.running.has(id) || (manual?.root === ctx.cwd && manual.id === id)) return ctx.ui.notify(`#${id} is running; stop or wait before merging.`, "warning");
+					const err = await merge(repo, backlog, id, await repo.base());
+					return ctx.ui.notify(err ? `Merge failed: ${err}` : `Merged ${repo.branch(id)} and marked #${id} done`, err ? "warning" : "info");
+				}
+				if (cmd === "loop") {
+					if (!ctx.isIdle()) return ctx.ui.notify("Agent busy; wait until idle.", "warning");
+					if (loop) return ctx.ui.notify("Loop already running; /noodle stop first.", "warning");
+					const num = (flag: string) => Number(rest[rest.indexOf(flag) + 1]);
+					const opts = {
+						parallel: rest.includes("--parallel") ? Math.max(1, num("--parallel") || 1) : 1,
+						auto: rest.includes("--auto"),
+						merge: rest.includes("--merge"),
+					};
+					const n = Number(rest.find((r, i) => /^\d+$/.test(r) && rest[i - 1] !== "--parallel") ?? 5);
+					if (!Number.isSafeInteger(n) || n < 1 || n > 100 || !Number.isSafeInteger(opts.parallel) || opts.parallel > 20) return ctx.ui.notify("Use 1-100 stages and 1-20 parallel workers.", "warning");
+					const l: Loop = { ctl: new AbortController(), running: new Map(), left: n, done: Promise.resolve() };
+					loop = l;
+					l.done = loopBody(ctx, repo, backlog, l, opts)
+						.catch((e) => ctx.ui.notify(`Noodle loop failed: ${e}`, "error"))
+						.finally(() => {
+							loop = undefined;
+							status(ctx, undefined);
+						});
+					ctx.ui.notify(`Loop started: max ${n} stage(s), parallel ${opts.parallel}${opts.auto ? ", auto" : ""}${opts.merge ? ", merge on PASS" : ""}. Logs: .noodle/logs/`, "info");
+					// Print mode exits when the handler returns: keep the process alive until the loop ends.
+					if (!ctx.hasUI) await l.done;
+					return;
+				}
+
+				if (!ALIASES[cmd] && cmd !== "do") return ctx.ui.notify(USAGE, "warning");
+				if (!ctx.isIdle()) return ctx.ui.notify("Agent busy; wait until idle.", "warning");
+
+				if (cmd === "plan" && !rest[0]) {
+					const mise = await buildMise(ctx, repo, backlog, 1);
+					if (!mise.backlog.length) return ctx.ui.notify(`No open items (${backlog.source})`, "warning");
+					pi.sendUserMessage(schedulePrompt(backlog.source, path.join(repo.dir, "mise.json"), mise));
+					return;
+				}
+
+				const skill = cmd === "do" ? rest[0] : ALIASES[cmd];
+				const id = cmd === "do" ? rest[1] : rest[0];
+				if (!skill || !id) return ctx.ui.notify(USAGE, "warning");
+				if (!skillsOf(ctx).some((s) => s.name === skill)) return ctx.ui.notify(`Unknown skill: ${skill}`, "warning");
+				const item = id === "-" ? undefined : (await backlog.items()).find((i) => i.id === id.replace(/^#/, ""));
+				if (id !== "-" && !item) return ctx.ui.notify(`No item #${id}`, "warning");
+				if (item && skill === "noodle-review" && !(await repo.hasBranch(item.id))) return ctx.ui.notify(`No branch ${repo.branch(item.id)} to review`, "warning");
+				if (item && loop?.running.has(item.id)) return ctx.ui.notify(`#${item.id} is running in the loop`, "warning");
+				const wt = item ? await repo.worktree(item.id, await repo.base()) : undefined;
+				const plan = item && (item.plan ?? repo.findPlan(item.id));
+				manual = { skill, id: item?.id ?? id, root: ctx.cwd };
+				pi.sendUserMessage(stagePrompt(skill, item && { ...item, ...(plan && { plan }) }, wt, backlog.source), { expandPromptTemplates: true });
+			} catch (e) {
+				ctx.ui.notify(`noodle: ${e instanceof Error ? e.message : e}`, "error");
+			}
+		},
+	});
 }

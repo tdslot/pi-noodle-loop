@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# $1: issue identifier (e.g. ENG-12). Moves it to the team's first "completed" state.
+set -euo pipefail
+gql() { curl -fsS -H "Authorization: $LINEAR_API_KEY" -H 'Content-Type: application/json' --data @- https://api.linear.app/graphql; }
+state=$(jq -n --arg id "$1" '{query: "query($id: String!) { issue(id: $id) { team { states(filter: {type: {eq: \"completed\"}}) { nodes { id } } } } }", variables: {id: $id}}' |
+  gql | jq -r '.data.issue.team.states.nodes[0].id // empty')
+[ -n "$state" ] || { echo "no completed state for $1" >&2; exit 1; }
+jq -n --arg id "$1" --arg s "$state" '{query: "mutation($id: String!, $s: String!) { issueUpdate(id: $id, input: {stateId: $s}) { success } }", variables: {id: $id, s: $s}}' |
+  gql | jq -e '.data.issueUpdate.success' >/dev/null

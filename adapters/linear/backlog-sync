@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Noodle backlog adapter: Linear GraphQL. NDJSON, one open issue per line.
+# Env: LINEAR_API_KEY, NOODLE_LINEAR_TEAM (team key, e.g. ENG), NOODLE_LINEAR_LABEL (default "noodle"; empty = all).
+set -euo pipefail
+label=${NOODLE_LINEAR_LABEL-noodle}
+jq -n --arg team "$NOODLE_LINEAR_TEAM" --arg label "$label" '{
+  query: "query($f: IssueFilter) { issues(filter: $f, first: 200) { nodes { identifier title priorityLabel labels { nodes { name } } } } }",
+  variables: {f: ({team: {key: {eq: $team}}, state: {type: {nin: ["completed", "canceled"]}}}
+                  + (if $label == "" then {} else {labels: {name: {eq: $label}}} end))}
+}' |
+  curl -fsS -H "Authorization: $LINEAR_API_KEY" -H 'Content-Type: application/json' --data @- https://api.linear.app/graphql |
+  jq -c 'if .errors then error(.errors|tojson) else . end | .data.issues.nodes[] | {id: .identifier, title, priority: .priorityLabel, tags: [.labels.nodes[].name]}'
