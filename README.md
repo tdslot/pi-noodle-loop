@@ -1,64 +1,135 @@
 # pi-noodle-loop
 
-[Noodle](https://poteto.github.io/noodle/introduction.html)'s idea, as a Pi package: **skills that run themselves**. Skills declare *when* they should run in a `schedule:` frontmatter field; a scheduler agent reads the backlog plus those fields, picks the next stage, and a fresh agent runs it in an isolated git worktree. No Noodle CLI; Pi runs everything. Agents commit on branches. **You merge.**
+[Noodle](https://poteto.github.io/noodle/introduction.html)'s skill loop adapted to Pi. A scheduler reads skill `schedule:` fields, backlog and recent results. Workers execute stages in isolated git worktrees; independent items can run in parallel.
 
 ## Install
 
-```bash
-pi install npm:pi-noodle-loop
-# or
+```sh
 pi install git:github.com/tdslot/pi-noodle-loop
+```
+
+Do not load a local copy and an installed package together: duplicate `/noodle` commands receive numeric suffixes. For isolated local testing:
+
+```sh
+pi --no-extensions -e ./pi-noodle --skill ./pi-noodle/skills
 ```
 
 ## Commands
 
-Backlog is `todos.md` in the project root, Noodle format (`1. [ ] task`, `<!-- next-id: N -->`). Runtime state lives in `.noodle/` (self-gitignored).
-
 | Command | Effect |
 |---|---|
-| `/noodle status` | Open items and loop state |
-| `/noodle add <text>` | Append item (creates `todos.md` if missing) |
-| `/noodle plan` | One scheduler pass: builds the mise, proposes order and the next stage. No edits. |
-| `/noodle plan <id>` | `noodle-plan`: phased plan in `plans/`, linked from the item. No implementation. |
-| `/noodle run <id>` | `noodle-execute`: implement in a worktree, verify, commit, mark done. Never merges or pushes. |
-| `/noodle review <id>` | `noodle-review`: Skeptic/Architect/Minimalist review, PASS/CONTESTED/REJECT verdict. No edits. |
-| `/noodle do <skill> <id\|->` | Run any skill as a stage, e.g. your own schedulable skill |
-| `/noodle loop [n] [--auto]` | Loop: schedule, run stage, schedule again, up to `n` stages (default 5). Each stage in a fresh session. Asks before each stage unless `--auto`. |
-| `/noodle stop` | End the loop |
+| `/noodle status` | Open items and current workers |
+| `/noodle add <text>` | Add local or adapter-backed item |
+| `/noodle plan` | Scheduler pass only |
+| `/noodle plan <id>` | Write phased plan on item's branch |
+| `/noodle run <id>` | Execute on item's branch |
+| `/noodle review <id>` | Review item's branch |
+| `/noodle do <skill> <id\|->` | Run a loaded skill for an item, or `-` without one |
+| `/noodle loop [n] [--parallel k] [--auto] [--merge]` | Run at most `n` stages (default 5), at most `k` concurrent workers (default 1) |
+| `/noodle stop` | Abort current loop workers |
+| `/noodle merge <id>` | Explicitly merge branch and mark item done |
+| `/noodle init <github\|jira\|linear>` | Copy adapter scripts into project and configure `.noodle.json` |
 
-## How the loop works
+`--auto` skips per-stage confirmation. `--merge` explicitly authorizes automatic local merges after a successful review with the exact machine-readable `NOODLE_VERDICT: PASS` result. No pushes. Without `--merge`, review branches yourself and call `/noodle merge <id>`.
 
-1. **Mise.** `/noodle` writes `.noodle/mise.json`: open backlog items (with linked `plan`), `noodle/*` branches and whether they're merged, the last 10 stage results from `.noodle/history.jsonl`, and `task_types` (every loaded skill with a `schedule:` field).
-2. **Schedule.** The agent applies Noodle's scheduler rules (one plan at a time, plan complex items first, don't repeat succeeded stages, split items that failed twice, blocked by unmerged branches) and ends with `NEXT: <skill> <id>` or `NEXT: idle`.
-3. **Stage.** A fresh session runs `/skill:<skill>` for that item.
-4. **Record.** When the stage settles, its result is appended to history and the loop schedules again, until the limit, `NEXT: idle`, a decline, an abort, or `/noodle stop`.
+```text
+/noodle add Rename legacy helper and add regression test
+/noodle loop 8 --parallel 2 --auto --merge
+```
 
-## Schedulable skills
+## Execution and safety
 
-Any Pi skill becomes a task type by adding `schedule:`. The scheduler reads it as prose:
+- Branch `noodle/<id>`, worktree `.noodle/worktrees/<id>` created by the extension, reused by plan/execute/review stages.
+- Loop stages run as `pi -p` subprocesses. Child extension discovery is disabled to prevent recursive orchestrators and duplicate command conflicts. Built-in tools and skills remain available; extension-provided tools such as pi-subagents are not loaded in these subprocesses.
+- Scheduler and workers use separate model invocations. Each worker commits only in its worktree. Scheduler only proposes stages.
+- Merge queue is serialized. A dirty tracked main checkout (except `todos.md`) or dirty worker checkout blocks merging. Conflicts are aborted and recorded; branches/worktrees retained for inspection. Empty branches are not considered completed work.
+- Backlog item becomes done only after merge, not after implementation.
+- `.noodle/mise.json`: backlog, plan paths, item branches, active workers, available slots, routing and schedulable skills. `.noodle/history.jsonl`: stage/merge results. `.noodle/logs/`: worker logs. Runtime directory self-gitignored.
+- Scheduler decisions are model judgments, not dependency proofs. Use conservative concurrency for related items.
+- Loop state is in memory, not restart-resumable. Committed branches, worktrees, history and logs survive. Session shutdown aborts the loop.
+- Logs can include source/task content; treat them as private. Do not put secrets in task descriptions.
+
+## Routing
+
+Project `.noodle.json` (optional):
+
+```json
+{
+  "routing": {
+    "default": "provider/model",
+    "scheduler": "provider/reasoning-model",
+    "noodle-execute": "provider/coding-model",
+    "noodle-review": "provider/review-model"
+  },
+  "timeoutMinutes": 60
+}
+```
+
+Use model identifiers from `pi --list-models`; no credentials in this file. Scheduler may propose `NEXT: noodle-execute 42 @provider/model`. Explicit stage model overrides routing, then skill routing, then default. Omitted model uses child Pi's configured default.
+
+## Backlog adapters
+
+Default source: project-root `todos.md`, Noodle numbered checkbox format:
+
+```markdown
+# Todos
+<!-- next-id: 2 -->
+## Inbox
+1. [ ] First task
+```
+
+`/noodle init` copies scripts and writes adapter configuration. Requires Bash, jq, plus gh (GitHub) or curl (Jira/Linear). Inspect scripts before enabling; `done` closes/transitions remote issues after merge.
+
+| Adapter | Environment |
+|---|---|
+| GitHub | Existing `gh auth login`; optional `NOODLE_GH_REPO=owner/repo`, `NOODLE_GH_LABEL` (default `noodle`, empty selects all) |
+| Jira Cloud | `JIRA_URL`, `JIRA_EMAIL`, `JIRA_TOKEN`; optional `NOODLE_JIRA_JQL`, `NOODLE_JIRA_DONE` (default `Done`); creation requires `NOODLE_JIRA_PROJECT`, optional `NOODLE_JIRA_TYPE` |
+| Linear | `LINEAR_API_KEY`, `NOODLE_LINEAR_TEAM`; optional `NOODLE_LINEAR_LABEL` (default `noodle`, empty selects all) |
+
+Store credentials in your shell/secret manager, not Git. Existing label must exist on GitHub. Jira transition must be available for each issue. Sources currently return a bounded first page (GitHub/Linear 200, Jira 100); narrow filters for larger queues. Live Jira/Linear mutations require testing against your project's workflows.
+
+Custom adapter contract:
+
+```json
+{
+  "adapters": {
+    "backlog": {
+      "sync": "adapters/backlog-sync",
+      "add": "adapters/backlog-add",
+      "done": "adapters/backlog-done"
+    }
+  }
+}
+```
+
+Commands run relative to project root. `sync` emits NDJSON objects requiring `id`, `title`; optional `status: done`, `plan`, other metadata passed through. `add` gets JSON `{ "title": "..." }` on stdin, prints ID. `done` gets ID as first argument.
+
+## Skills
+
+Bundled `noodle-plan`, `noodle-execute`, `noodle-review` adapt Noodle's process and principles. Any loaded skill with `schedule:` becomes schedulable. Example:
 
 ```yaml
 ---
-name: changelog
-description: Update CHANGELOG.md from merged noodle branches.
-schedule: "After a noodle-execute stage merged a user-visible change"
+name: reflect
+description: Capture reusable lessons from completed stages.
+schedule: "After a reviewed item merged successfully"
 ---
 ```
 
-Bundled: `noodle-plan`, `noodle-execute`, `noodle-review`. With [pi-subagents](https://pi.dev/packages) installed, they delegate exploration, independent changes, and review lenses to child agents.
+No brain memory vault or external cloud runtime is installed. General skills remain independently callable.
 
-## Differences from Noodle
+## Verification
 
-- One stage at a time; parallelism happens inside `noodle-execute` via subagents, not a dispatcher.
-- No merge queue or auto-merge: branches wait for you. The scheduler sees unmerged branches and treats dependent items as blocked.
-- Backlog is `todos.md` only; no adapters (GitHub/Linear/Jira).
-- Model routing is advisory (skills name tiers); no per-stage provider config.
-- No brain/reflect/meditate memory loop. Add your own scheduled `reflect` skill if you want it.
+Node.js with native TypeScript stripping:
 
-## Credits
+```sh
+npm test
+shellcheck -S warning adapters/*/*
+npm pack --dry-run
+```
 
-Skills, scheduler rules, and principles adapted from [poteto/noodle](https://github.com/poteto/noodle) by Lauren Tan (MIT): `schedule`, `plan`, `execute`, `quality`, `adversarial-review`, `brain/principles`. Changed for Pi: plain `git worktree` instead of `noodle worktree`, no merge step, no `noodle event` calls, pi-subagents instead of Claude Task/Team tools.
+Tests cover parsing, adapter failures, real Git worktrees/conflicts, parallel workers, routing, serialized merges and confirmation gating. Real Pi smoke test also exercised execute, review and automatic merge in a disposable repository.
 
-## License
+## Credits / license
 
-MIT. See [LICENSE](LICENSE).
+MIT. Skills, scheduling rules and principles adapted from [poteto/noodle](https://github.com/poteto/noodle) by Lauren Tan. Plain Git replaces Noodle CLI; Pi processes replace its runtime. See LICENSE for original and adaptation notices.

@@ -1,7 +1,7 @@
 {
   "name": "pi-noodle-loop",
-  "version": "0.3.0",
-  "description": "Noodle-style skill loop for Pi: scheduler reads skill schedule: fields, runs plan/execute/review stages in worktrees; you merge",
+  "version": "0.4.0",
+  "description": "Pi skill loop with parallel worktrees, per-stage models, serialized merges, and GitHub/Jira/Linear backlog adapters",
   "keywords": [
     "pi-package",
     "pi",
@@ -16,6 +16,7 @@
   "files": [
     "extensions",
     "skills",
+    "adapters",
     "README.md",
     "CHANGELOG.md",
     "LICENSE"

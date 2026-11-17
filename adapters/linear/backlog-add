@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# stdin: {"title": "..."}; prints the new issue identifier.
+set -euo pipefail
+gql() { curl -fsS -H "Authorization: $LINEAR_API_KEY" -H 'Content-Type: application/json' --data @- https://api.linear.app/graphql; }
+title=$(jq -r .title)
+team=$(jq -n --arg k "$NOODLE_LINEAR_TEAM" '{query: "query($k: String!) { teams(filter: {key: {eq: $k}}) { nodes { id } } }", variables: {k: $k}}' | gql | jq -er 'if .errors then error(.errors|tojson) else .data.teams.nodes[0].id // error("team not found") end')
+jq -n --arg t "$team" --arg title "$title" '{query: "mutation($i: IssueCreateInput!) { issueCreate(input: $i) { issue { identifier } } }", variables: {i: {teamId: $t, title: $title}}}' |
+  gql | jq -er 'if .errors then error(.errors|tojson) else .data.issueCreate.issue.identifier // error("issue creation failed") end'

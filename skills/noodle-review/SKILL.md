@@ -10,7 +10,7 @@ Challenge completed work. The deliverable is a verdict; **make no changes**. Ada
 
 ## 1. Scope and intent
 
-Find the target: branch `noodle/<id>-*` or worktree, plan file, or given diff. Read the item/plan. State the **intent** explicitly: reviewers judge whether the work achieves it well, not whether the intent is right.
+Find the target: the `Worktree:` and branch `noodle/<id>` named in the prompt, a plan file, or a given diff. Read the item/plan. State the **intent** explicitly: reviewers judge whether the work achieves it well, not whether the intent is right.
 
 Base = the repo's default branch (`main`, `master`, ...; check `git symbolic-ref refs/remotes/origin/HEAD` or `git branch`). Gather: `git diff --stat <base>...<branch>`, `git log --oneline <base>..<branch>`, full diff.
 
@@ -60,4 +60,4 @@ When pi-subagents is available, run each lens as a separate read-only `reviewer`
 - **CONTESTED**: high-severity findings, reviewers disagree.
 - **REJECT**: high-severity findings with consensus. Write findings so a retry run can act on them directly.
 
-Low-severity, non-blocking issues: offer to add them as backlog items (`/noodle add ...`).
+End with exactly one machine-readable line, untranslated: `NOODLE_VERDICT: PASS`, `NOODLE_VERDICT: CONTESTED`, or `NOODLE_VERDICT: REJECT`. Only a successful review process with `NOODLE_VERDICT: PASS` allows `/noodle loop --merge` to merge. Low-severity, non-blocking issues: list them as suggested backlog items.

@@ -12,7 +12,7 @@ Work autonomously. Don't stop until done or genuinely blocked. Ask only on real 
 
 ## 1. Scope
 
-- **Backlog item**: read it in `todos.md`. If it links a plan (`plans/...`), read the overview and the assigned phase.
+- **Backlog item**: the prompt gives id, title, and `Plan:` if one exists; read the plan overview and the next unchecked phase.
 - **Ad-hoc request**: the prompt is the scope.
 
 Identify affected files and packages. Write down a bounded scope: what changes, what explicitly doesn't.
@@ -27,10 +27,10 @@ Split into discrete changes. Each change: one function/type + its tests, or one 
 
 Never edit the main checkout: concurrent sessions cause conflicts and lost work.
 
-- Already inside a worktree for this item? Use it.
-- Otherwise: `git worktree add -b noodle/<id>-<slug> <repo>/../<repo>-worktrees/<id>-<slug>` (or `.worktrees/` if the repo ignores it).
+- If the prompt names a `Worktree:` (started by `/noodle`), it already exists on branch `noodle/<id>`. Work and commit only there.
+- Otherwise create one: `git worktree add -b noodle/<id> <repo>/.noodle/worktrees/<id>` (base = current branch).
 - Use absolute paths or `git -C <worktree>`. Never `cd` into a worktree: if it is removed while the shell is inside, the session breaks.
-- Commit inside the worktree. **Do not merge or push.** The human reviews and merges.
+- Commit inside the worktree. **Do not merge or push.** Merging is done by `/noodle merge <id>`, the loop's `--merge` after a PASS review, or the human.
 
 Skip the worktree only if the user explicitly chooses to work on main in an interactive session.
 
@@ -56,7 +56,7 @@ Before every commit run this project's full checks: discover them from `package.
 
 ## 6. Report
 
-When verified: mark the item `[x]` in the main checkout's `todos.md` (only that line). Finish with:
+Do not edit `todos.md` or mark the item done: `/noodle` marks it when the branch merges. Finish with:
 
 - branch and worktree path
 - commits (`git log --oneline <base>..HEAD`, base = repo default branch)
@@ -66,5 +66,5 @@ When verified: mark the item `[x]` in the main checkout's `todos.md` (only that 
 ## Scope discipline
 
 - Change only what's in scope. No defensive code, backward-compat shims, or speculative features.
-- Out-of-scope discoveries go in the report (or `/noodle add`), not into this diff.
+- Out-of-scope discoveries go in the report, not into this diff.
 - Wrong or incomplete requirements: flag it; don't silently deviate.

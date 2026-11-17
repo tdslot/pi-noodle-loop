@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.4.0]
+
+- Parallel Pi subprocess workers with isolated per-item worktrees and per-stage model routing.
+- Serialized local merge queue; automatic merging only after successful review with `NOODLE_VERDICT: PASS` and explicit `--merge`.
+- GitHub Issues, Jira Cloud and Linear backlog adapter scripts; `/noodle init` and custom adapter support.
+- Backlog completion follows successful merge; dirty worktrees and empty branches block merging.
+- Child extension discovery disabled to prevent duplicate/recursive orchestrators; bounded stage timeouts.
+- Regression coverage for Git merge conflicts, concurrent workers, routing, adapters and fail-closed review protocol.
+
 ## [0.3.0]
 
 - Loop: `/noodle loop [n] [--auto]` runs schedule and stages in fresh sessions until the limit or idle; `/noodle stop`.

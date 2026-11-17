@@ -24,7 +24,9 @@ Delegate broad exploration to read-only subagents when available (pi-subagents `
 
 ## 3. Write the plan
 
-Small plan: `plans/<id>-<slug>.md`. 3+ phases: directory `plans/<id>-<slug>/` with `overview.md` and `phase-N-<name>.md`.
+Small plan: `plans/<id>-<slug>.md`. 3+ phases: directory `plans/<id>-<slug>/` with `overview.md` and `phase-N-<name>.md`. The `<id>-` prefix is how `/noodle` links the plan to the item.
+
+If the prompt names a `Worktree:`, write the plan files there and commit them (`docs(plan): ...`); the plan merges with the item's branch. Otherwise write them in the current checkout.
 
 **Overview** must have: Context (problem, why), Scope (in / explicitly out), Constraints, Alternatives (2-3 sketched for architectural choices, which chosen and why), Phases (ordered links), Verification (project-level commands).
 
@@ -45,7 +47,7 @@ Small plan: `plans/<id>-<slug>.md`. 3+ phases: directory `plans/<id>-<slug>/` wi
 
 ## 4. Link and self-check
 
-- Append the plan path to the item in `todos.md`: `N. [ ] text plans/<id>-<slug>/overview.md`.
+- Do not edit the backlog; the `plans/<id>-` prefix links the plan.
 - Verify: overview cites at least 2 principles by name; no phase touches >3 files; no code blocks in phases.
 
 ## 5. Present and stop

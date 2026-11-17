@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# $1: issue key. Applies the transition named NOODLE_JIRA_DONE (default "Done").
+set -euo pipefail
+api="$JIRA_URL/rest/api/3/issue/$1/transitions"
+tid=$(curl -fsS -u "$JIRA_EMAIL:$JIRA_TOKEN" "$api" |
+  jq -r --arg n "${NOODLE_JIRA_DONE:-Done}" '[.transitions[] | select(.name == $n or .to.name == $n)][0].id // empty')
+[ -n "$tid" ] || { echo "no transition '${NOODLE_JIRA_DONE:-Done}' for $1" >&2; exit 1; }
+jq -n --arg id "$tid" '{transition: {id: $id}}' |
+  curl -fsS -u "$JIRA_EMAIL:$JIRA_TOKEN" -H 'Content-Type: application/json' -X POST --data @- "$api"

@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Noodle backlog adapter: Jira Cloud REST v3. NDJSON, one issue per line.
+# Env: JIRA_URL, JIRA_EMAIL, JIRA_TOKEN (API token),
+#      NOODLE_JIRA_JQL (default: unresolved issues assigned to you, labelled noodle).
+set -euo pipefail
+jql=${NOODLE_JIRA_JQL:-'assignee = currentUser() AND resolution = Unresolved AND labels = noodle ORDER BY priority DESC'}
+jq -n --arg jql "$jql" '{jql: $jql, maxResults: 100, fields: ["summary","status","priority","labels"]}' |
+  curl -fsS -u "$JIRA_EMAIL:$JIRA_TOKEN" -H 'Content-Type: application/json' -X POST --data @- \
+    "$JIRA_URL/rest/api/3/search/jql" |
+  jq -c 'if .errorMessages or .errors then error(.|tojson) else . end | .issues[] | {id: .key, title: .fields.summary, status: (if .fields.status.statusCategory.key == "done" then "done" else "open" end), priority: .fields.priority.name, tags: .fields.labels}'
