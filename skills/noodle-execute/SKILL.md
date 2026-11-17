@@ -15,6 +15,8 @@ Work autonomously. Don't stop until done or genuinely blocked. Ask only on real 
 - **Backlog item**: the prompt gives id, title, and `Plan:` if one exists; read the plan overview and the next unchecked phase. After implementing and verifying that phase, check its `- [ ] NOODLE_PHASE_COMPLETE` marker and commit the change. Never mark unfinished phases complete.
 - **Ad-hoc request**: the prompt is the scope.
 
+Read the plan's Applicable skills and their supporting references before coding. For ad-hoc tasks, inspect available skill descriptions and read those matching the domain. Use noodle-testing for behavior changes and noodle-debugging for reported bugs; these are workflows, not optional slogans.
+
 Identify affected files and packages. Write down a bounded scope: what changes, what explicitly doesn't.
 
 ## 2. Decompose

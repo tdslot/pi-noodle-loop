@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.5.0]
+
+- Forward parent domain skill paths into isolated workers; plan/execute/review explicitly load applicable domain guidance.
+- Add portable testing/debugging workflows with reproduction, regression evidence and scoped root-cause verification.
+- Require distinct canonical implementation/review model identities; reject self-review, thinking-only variations, fuzzy model aliases and unknown prior model evidence.
+- Restore experience-first principle, external API compatibility qualifiers and scoped-fix discipline.
+- Recognize CRLF skill frontmatter.
+- Verified real GPT implementation / Claude review / automatic merge in disposable repository.
+
 ## [0.4.1]
 
 - Gate whole-item merge on completion evidence for every plan phase, including explicit ticket plan paths and single-file plans.

@@ -22,13 +22,17 @@ Resolve real ambiguity first (in scope / out of scope, constraints, what "done" 
 
 Delegate broad exploration to read-only subagents when available (pi-subagents `scout`/`researcher`); run independent areas in parallel. Keep summaries, not raw output, in the main context. Map: affected code, patterns and conventions, dependencies, tests, verification commands.
 
+## Domain guidance
+
+Inspect available skill names/descriptions and read installed skills matching the task's language, framework, infrastructure or testing domain. Do not assume a skill was loaded merely because it appears in the catalogue. Record **Applicable skills** by name and source path in the overview and each affected phase; incorporate relevant constraints into the phase brief. If no matching skill exists, say so; do not install unreviewed external skills automatically.
+
 ## 3. Write the plan
 
 Small plan: `plans/<id>-<slug>.md`. 3+ phases: directory `plans/<id>-<slug>/` with `overview.md` and `phase-N-<name>.md`. The `<id>-` prefix is how `/noodle` links the plan to the item.
 
 If the prompt names a `Worktree:`, write the plan files there and commit them (`docs(plan): ...`); the plan merges with the item's branch. Otherwise write them in the current checkout.
 
-**Overview** must have: Context (problem, why), Scope (in / explicitly out), Constraints, Alternatives (2-3 sketched for architectural choices, which chosen and why), Phases (ordered links), Verification (project-level commands).
+**Overview** must include Applicable skills (names and paths). It must have: Context (problem, why), Scope (in / explicitly out), Constraints, Alternatives (2-3 sketched for architectural choices, which chosen and why), Phases (ordered links), Verification (project-level commands).
 
 **Each phase** must include a completion checkbox `- [ ] NOODLE_PHASE_COMPLETE`, checked only after implementation and verification. **Each phase** must have: back-link to overview; Goal; Changes (files + what, high level); Data structures (name key types; one-line sketch max); Model tier (fast for mechanical, strong for judgment); Verification: static (types, lint, tests) and runtime (feature path to exercise, edge cases, tests to add).
 
