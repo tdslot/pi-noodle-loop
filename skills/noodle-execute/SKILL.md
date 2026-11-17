@@ -12,7 +12,7 @@ Work autonomously. Don't stop until done or genuinely blocked. Ask only on real 
 
 ## 1. Scope
 
-- **Backlog item**: the prompt gives id, title, and `Plan:` if one exists; read the plan overview and the next unchecked phase.
+- **Backlog item**: the prompt gives id, title, and `Plan:` if one exists; read the plan overview and the next unchecked phase. After implementing and verifying that phase, check its `- [ ] NOODLE_PHASE_COMPLETE` marker and commit the change. Never mark unfinished phases complete.
 - **Ad-hoc request**: the prompt is the scope.
 
 Identify affected files and packages. Write down a bounded scope: what changes, what explicitly doesn't.

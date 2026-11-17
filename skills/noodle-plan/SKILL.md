@@ -30,7 +30,7 @@ If the prompt names a `Worktree:`, write the plan files there and commit them (`
 
 **Overview** must have: Context (problem, why), Scope (in / explicitly out), Constraints, Alternatives (2-3 sketched for architectural choices, which chosen and why), Phases (ordered links), Verification (project-level commands).
 
-**Each phase** must have: back-link to overview; Goal; Changes (files + what, high level); Data structures (name key types; one-line sketch max); Model tier (fast for mechanical, strong for judgment); Verification: static (types, lint, tests) and runtime (feature path to exercise, edge cases, tests to add).
+**Each phase** must include a completion checkbox `- [ ] NOODLE_PHASE_COMPLETE`, checked only after implementation and verification. **Each phase** must have: back-link to overview; Goal; Changes (files + what, high level); Data structures (name key types; one-line sketch max); Model tier (fast for mechanical, strong for judgment); Verification: static (types, lint, tests) and runtime (feature path to exercise, edge cases, tests to add).
 
 ### Phase sizing
 
