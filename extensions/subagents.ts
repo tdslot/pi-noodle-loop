@@ -2,9 +2,8 @@ import { randomUUID } from 'node:crypto';
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 
 /** Public pi-subagents event RPC; no private registry, process manager, polling or UI. */
-export function subagentRpc(pi: ExtensionAPI, method: string, params: Record<string, unknown>): Promise<any> {
+export function subagentRpc(pi: ExtensionAPI, method: string, params: Record<string, unknown>, requestId=randomUUID()): Promise<any> {
  return new Promise((resolve,reject)=>{
-  const requestId=randomUUID();
   const dispose=pi.events.on(`subagents:rpc:v1:reply:${requestId}`,(reply:any)=>{
    clearTimeout(timer);dispose();
    if(reply?.success) resolve(reply.data); else reject(new Error(reply?.error?.message ?? 'pi-subagents request failed'));
@@ -16,6 +15,7 @@ export function subagentRpc(pi: ExtensionAPI, method: string, params: Record<str
 export function coordinatorTask(pkg:string,cwd:string,stages:number,parallel:number,merge:boolean):string {
  return [
   `Native Noodle coordination in ${cwd}. At most ${stages} stage launches, ${parallel} independent stages concurrently.`,
+  'Parent holds .noodle/owner.lock for this native run. Do not remove, modify, bypass or acquire another Noodle ownership lock. Use plain Git worktrees only inside the authorized repository.',
   `Read ${cwd}/.noodle.json when present, ${cwd}/todos.md, and ${pkg}/skills/noodle-plan/SKILL.md, ${pkg}/skills/noodle-execute/SKILL.md, ${pkg}/skills/noodle-review/SKILL.md.`,
   'Do not execute /noodle loop or start standalone pi processes. Use native subagent calls for every planning, implementation and review stage; do not implement in coordinator.',
   'Native subagent tooling must be available. If absent, report blocker and stop; no CLI fallback. Delegate subagent fanout only for the bounded stages authorized here.',

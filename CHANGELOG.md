@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.0]
+
+- Hold exclusive repository ownership across native launch; coordinator terminal proof does not release ownership without descendant termination evidence.
+- Retain ownership on missing launch identity, uncertain launch, session shutdown or unknown terminal proof; no unsafe automatic unlock.
+- Persist verified Git result (launch base, authorized item branches/heads and dirty-worktree findings) and append evidence to parent context.
+- Disable native `--merge` until structural phase/review attestation is implemented; model prose is not merge authorization.
+
 ## [0.7.1]
 
 - Reject native background launch outside a Git project root, without open backlog tasks, or without available distinct implementation/review models.

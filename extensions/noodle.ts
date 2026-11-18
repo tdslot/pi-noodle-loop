@@ -17,6 +17,8 @@
 
 import { createHash } from "node:crypto";
 import { Journal } from "./state.ts";
+import { NativeOwnership, observedTerminal, verifyNativeResult } from "./native.ts";
+import { randomUUID } from "node:crypto";
 import { subagentRpc, coordinatorTask } from "./subagents.ts";
 import { spawn } from "node:child_process";
 import fs from "node:fs";
@@ -373,6 +375,26 @@ export default function (pi: ExtensionAPI) {
 	let manual: { skill: string; id: string; root: string; release: () => void } | undefined;
 	let mergeChain = Promise.resolve();
  let disposeAgent: (()=>void) | undefined;
+ const nativeRuns=new Map<string,{owner:NativeOwnership;lease:import('./native.ts').NativeLease;ctx:ExtensionCommandContext}>();
+ const earlyTerminal=new Map<string,any>();
+ const nativeTerminal = async (proof:any)=>{
+  const tracked=nativeRuns.get(proof?.runId);
+  if(!tracked){if(proof?.runId&&observedTerminal(proof,proof.runId)){earlyTerminal.set(proof.runId,proof);if(earlyTerminal.size>32)earlyTerminal.delete(earlyTerminal.keys().next().value!);}return;}
+  if(!observedTerminal(proof,tracked.lease.runId!))return;
+  nativeRuns.delete(proof.runId);
+  try {
+   const result=await verifyNativeResult(tracked.owner.root,tracked.lease);
+   fs.writeFileSync(path.join(tracked.owner.root,'.noodle',`native-result-${tracked.lease.token}.json`),JSON.stringify({runId:proof.runId,observedAt:proof.observedAt,...result},null,2));
+   tracked.ctx.ui.notify(`Native Git verification: ${result.ok?'evidence available':'inspection required'}\n${result.lines.join('\n')}`,result.ok?'info':'warning');
+   pi.sendMessage({customType:'noodle-native-evidence',content:`Verified native Git result for ${proof.runId}:\n${result.lines.join('\n')}`,display:true},{triggerTurn:false});
+  }catch(e){tracked.ctx.ui.notify(`Native result verification failed: ${e}`,'error');}
+  finally{
+   // Coordinator proof does not attest detached descendants. Retain ownership fail-closed.
+   tracked.owner.save({...tracked.lease,status:'terminal'});
+   tracked.ctx.ui.notify('Coordinator terminated; repository ownership retained until all native descendants are independently confirmed stopped. Do not remove the lock based on coordinator completion alone.','warning');
+  }
+ };
+ pi.events?.on('subagent:process-terminal',nativeTerminal);
 
 	const skillsOf = (ctx: ExtensionCommandContext) => ctx.getSystemPromptOptions?.().skills ?? [];
  const childSkillArgs = (ctx: ExtensionCommandContext) => {
@@ -615,9 +637,20 @@ export default function (pi: ExtensionAPI) {
      pi.events.emit('pi-subagents:runtime-agent-register:v1',request);
      if(!request.result?.ok) throw new Error('pi-subagents runtime registration unavailable; load pi-subagents before /noodle bg.');
      disposeAgent=()=>request.result.registration.dispose();
-     const result=await subagentRpc(pi,'spawn',{agent:'noodle-loop',cwd:ctx.cwd,task:coordinatorTask(PKG,ctx.cwd,count,parallel,rest.includes('--merge')),async:true});
-     ctx.ui.notify(typeof result?.text==='string' ? result.text : 'Noodle launched via pi-subagents; use native subagent status and controls.','info');
+     if(rest.includes('--merge')) throw new Error('Native automatic merge remains disabled until structural review/phase attestation is implemented; inspect branches and merge explicitly.');
+     const requestId=randomUUID();
+     const owner=new NativeOwnership(ctx.cwd);
+     const lease=await owner.acquire(ctx.sessionManager?.getSessionId?.() ?? 'unknown',items.map(i=>i.id),requestId);
+     try {
+      const result=await subagentRpc(pi,'spawn',{agent:'noodle-loop',cwd:ctx.cwd,task:coordinatorTask(PKG,ctx.cwd,count,parallel,false),async:true},requestId);
+      const runId=result?.details?.runId ?? result?.details?.async?.runId;
+      if(typeof runId!=='string') {owner.save({...lease,status:'uncertain'});throw new Error('Native launch reply lacks run ID; ownership retained. Inspect native status, do not relaunch.');}
+      lease.runId=runId;lease.status='running';owner.save(lease);nativeRuns.set(runId,{owner,lease,ctx});
+      const proof=earlyTerminal.get(runId);if(proof){earlyTerminal.delete(runId);void nativeTerminal(proof);}
+      ctx.ui.notify(typeof result?.text==='string' ? result.text : 'Native Noodle launched; repository ownership retained until observed process termination.','info');
+     }catch(e){owner.save({...lease,status:'uncertain'});throw e;}
      return;
+
     }
     if (cmd === "jobs") {
      const result=await subagentRpc(pi,'status',rest[0]?{id:rest[0]}:{});

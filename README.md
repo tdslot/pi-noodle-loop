@@ -62,7 +62,13 @@ pi --no-extensions -e ./pi-noodle --skill ./pi-noodle/skills
 
 The native `noodle-loop` coordinator reads the Noodle skills and delegates bounded stages through native subagent calls. It never starts another standalone Pi CLI loop. Its run lifecycle and child-stage evidence belong to pi-subagents; this path does not claim the standalone `/noodle loop` journal/recovery guarantees. Pi's existing subagent TUI shows its task/tool/activity; native completion delivers results to the original parent so it can continue. Use normal subagent status, transcript, stop and interrupt controls for that native run. `/noodle jobs` delegates to the same native status API. `/noodle status` still describes the current repository only.
 
-Background delegation explicitly authorizes unattended stage selection (`--auto`), but local merging remains opt-in with `--merge`; no pushes. Session ownership, output, run retention and wake policy belong to pi-subagents. Noodle still owns its repository-specific execution/checkpoint policy, not an independent background-job manager.
+Background delegation explicitly authorizes unattended stage selection (`--auto`). Native `--merge` is currently rejected: structural phase/review attestation is not implemented yet. Inspect branches and use an explicitly approved manual merge; no pushes. Session ownership, output, run retention and wake policy belong to pi-subagents. Noodle still owns its repository-specific execution/checkpoint policy, not an independent background-job manager.
+
+### Native ownership and verified results
+
+Native launch acquires the same `.noodle/owner.lock` as standalone mutation paths before spawning. Another session cannot launch against that repository. Ownership is retained even after coordinator process-terminal proof: that proof does not establish termination of detached descendant workers. A model completion, stop acknowledgement, or coordinator proof alone never unlocks the repository. Lost launch replies, shutdown/reload and ambiguous identity retain the lock for inspection. Do not remove it while native descendants may still run.
+
+On observed termination, Noodle checks the launch integration commit, authorized `noodle/<item-id>` branches and worktree cleanliness, writes `.noodle/native-result-<token>.json`, and appends Git evidence to parent context. Test and reviewer claims remain native output, not structurally verified attestations; this check never authorizes merge. Automatic descendant-proof reconciliation and unlock, including after reload, remain future work. This release deliberately fails closed: inspect every native descendant and confirm it has stopped before manually removing a retained lock.
 
 ## Recovery
 

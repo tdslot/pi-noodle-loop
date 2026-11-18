@@ -1,6 +1,6 @@
 {
   "name": "pi-noodle-loop",
-  "version": "0.7.1",
+  "version": "0.8.0",
   "description": "Pi skill loop with parallel worktrees, per-stage models, serialized merges, and GitHub/Jira/Linear backlog adapters",
   "keywords": [
     "pi-package",
