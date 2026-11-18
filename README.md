@@ -26,7 +26,9 @@ pi --no-extensions -e ./pi-noodle --skill ./pi-noodle/skills
 | `/noodle review <id>` | Review item's branch |
 | `/noodle do <skill> <id\|->` | Run a loaded skill for an item, or `-` without one |
 | `/noodle loop [n] [--parallel k] [--auto] [--merge]` | Run at most `n` stages (default 5), at most `k` concurrent workers (default 1) |
-| `/noodle stop` | Abort current loop workers |
+| `/noodle stop` | Abort current foreground loop workers |
+| `/noodle bg [n] [--parallel k] [--merge]` | Delegate loop to native pi-subagents async agent; native TUI and completion wake return result to originating parent |
+| `/noodle jobs [run-id]` | Read native pi-subagents status from the current session |
 | `/noodle recover` | Mark lost attempts interrupted; retry pending backlog closure after Git ancestry/destination checks |
 | `/noodle retry <id>` | Acknowledge interrupted work after inspecting it, allowing a fresh loop attempt |
 | `/noodle merge <id>` | Explicitly merge branch and mark item done |
@@ -53,6 +55,14 @@ pi --no-extensions -e ./pi-noodle --skill ./pi-noodle/skills
 - Scheduler decisions are model judgments, not dependency proofs. Use conservative concurrency for related items.
 - Worker processes are not adopted after restart. `.noodle/state.json` durably checkpoints attempts (before/after commits, model identity, verdict) and merge intents. Lost running attempts become interrupted, not successful. Session shutdown aborts and drains the loop. Unix workers use process-group TERM followed by KILL after one second; adapter commands have a 60-second timeout and loop cancellation. Windows currently terminates only the direct child, not its entire process tree.
 - Logs can include source/task content; treat them as private. Do not put secrets in task descriptions.
+
+## Native background delegation
+
+`/noodle bg 4 --parallel 2` uses pi-subagents' public runtime-agent registration and event-bus spawn API. It requires pi-subagents loaded in the parent Pi session. No separate Noodle job registry, polling loop, fleet implementation or process dashboard is installed. If native launch fails or its reply is lost, inspect native status; do not redispatch blindly and never fall back to an unmanaged process.
+
+The native `noodle-loop` coordinator reads the Noodle skills and delegates bounded stages through native subagent calls. It never starts another standalone Pi CLI loop. Its run lifecycle and child-stage evidence belong to pi-subagents; this path does not claim the standalone `/noodle loop` journal/recovery guarantees. Pi's existing subagent TUI shows its task/tool/activity; native completion delivers results to the original parent so it can continue. Use normal subagent status, transcript, stop and interrupt controls for that native run. `/noodle jobs` delegates to the same native status API. `/noodle status` still describes the current repository only.
+
+Background delegation explicitly authorizes unattended stage selection (`--auto`), but local merging remains opt-in with `--merge`; no pushes. Session ownership, output, run retention and wake policy belong to pi-subagents. Noodle still owns its repository-specific execution/checkpoint policy, not an independent background-job manager.
 
 ## Recovery
 
