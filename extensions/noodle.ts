@@ -17,6 +17,7 @@
 
 import { createHash } from "node:crypto";
 import { Journal } from "./state.ts";
+import { subagentRpc, coordinatorTask } from "./subagents.ts";
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
@@ -371,6 +372,7 @@ export default function (pi: ExtensionAPI) {
 	let loop: Loop | undefined;
 	let manual: { skill: string; id: string; root: string; release: () => void } | undefined;
 	let mergeChain = Promise.resolve();
+ let disposeAgent: (()=>void) | undefined;
 
 	const skillsOf = (ctx: ExtensionCommandContext) => ctx.getSystemPromptOptions?.().skills ?? [];
  const childSkillArgs = (ctx: ExtensionCommandContext) => {
@@ -567,7 +569,7 @@ export default function (pi: ExtensionAPI) {
 		ctx.ui.notify(`Noodle loop stopped: ${why}`, "info");
 	}
 
-	pi.on("session_shutdown", async () => { if (loop) { loop.ctl.abort(); await loop.done; } manual?.release(); manual = undefined; });
+	pi.on("session_shutdown", async () => { disposeAgent?.(); disposeAgent=undefined; if (loop) { loop.ctl.abort(); await loop.done; } manual?.release(); manual = undefined; });
 
 	pi.on("agent_settled", async (event) => {
 		if (!manual) return;
@@ -577,7 +579,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("noodle", {
 		description: "Noodle skill loop: status | add | plan [id] | run | review | do | merge | loop | stop | init",
 		getArgumentCompletions: (prefix) => {
-			const items = ["status", "add", "plan", "run", "review", "do", "merge", "loop", "stop", "init", "recover", "retry"].filter((s) => s.startsWith(prefix)).map((value) => ({ value, label: value }));
+			const items = ["status", "add", "plan", "run", "review", "do", "merge", "loop", "stop", "init", "recover", "retry", "bg", "jobs"].filter((s) => s.startsWith(prefix)).map((value) => ({ value, label: value }));
 			return items.length ? items : null;
 		},
 		handler: async (args, ctx) => {
@@ -588,7 +590,25 @@ export default function (pi: ExtensionAPI) {
 			const arg = args.trim().slice(cmd.length).trim();
 
 			try {
-				if (cmd === "status") {
+				if (cmd === "bg") {
+     const count=Number(rest[0] ?? 5);
+     const at=rest.indexOf('--parallel');
+     const parallel=at<0 ? 1 : Number(rest[at+1]);
+     if(!Number.isSafeInteger(count) || count<1 || count>100 || !Number.isSafeInteger(parallel) || parallel<1 || parallel>20) return ctx.ui.notify('Use /noodle bg 1-100 [--parallel 1-20] [--merge]','warning');
+     disposeAgent?.();
+     const request:any={version:1,name:'noodle-loop',definition:{description:'Native Noodle skill coordinator',systemPrompt:'Coordinate only through native subagent tools. Never spawn standalone pi or /noodle loop. Read supplied skill files and preserve approval boundaries. Return evidence to parent.',tools:['read','bash','subagent']}};
+     pi.events.emit('pi-subagents:runtime-agent-register:v1',request);
+     if(!request.result?.ok) throw new Error('pi-subagents runtime registration unavailable; load pi-subagents before /noodle bg.');
+     disposeAgent=()=>request.result.registration.dispose();
+     const result=await subagentRpc(pi,'spawn',{agent:'noodle-loop',cwd:ctx.cwd,task:coordinatorTask(PKG,ctx.cwd,count,parallel,rest.includes('--merge')),async:true});
+     ctx.ui.notify(typeof result?.text==='string' ? result.text : 'Noodle launched via pi-subagents; use native subagent status and controls.','info');
+     return;
+    }
+    if (cmd === "jobs") {
+     const result=await subagentRpc(pi,'status',rest[0]?{id:rest[0]}:{});
+     return ctx.ui.notify(result?.text ?? JSON.stringify(result),'info');
+    }
+    if (cmd === "status") {
 					const state=new Journal(repo.dir).read();
 					const open = (await backlog.items()).filter((i) => !i.done);
 					const lines = open.length ? open.map((i) => `#${i.id} ${i.title}`) : [`No open items (${backlog.source})`];

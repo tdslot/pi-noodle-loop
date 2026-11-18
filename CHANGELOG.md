@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.7.0]
+
+- `/noodle bg` delegates one bounded loop to native pi-subagents via public event RPC, with native TUI activity and completion return to parent.
+- `/noodle jobs` forwards native subagent status; no standalone background registry or polling manager.
+- Missing native integration fails closed; no silent CLI fallback.
+
 ## [0.6.0]
 
 - Atomic, fsynced attempt journal with before/after commits, model identity and verdict evidence.
