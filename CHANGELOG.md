@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.7.1]
+
+- Reject native background launch outside a Git project root, without open backlog tasks, or without available distinct implementation/review models.
+- Validate all explicit routing entries before creating native agent; do not create missing backlog/config files.
+- Regression coverage for home-like non-Git launch with zero files/agent events, empty backlog and model-routing failures.
+
 ## [0.7.0]
 
 - `/noodle bg` delegates one bounded loop to native pi-subagents via public event RPC, with native TUI activity and completion return to parent.
