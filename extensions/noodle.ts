@@ -15,6 +15,8 @@
  * need to survive restarts.
  */
 
+import { createHash } from "node:crypto";
+import { Journal } from "./state.ts";
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
@@ -33,6 +35,7 @@ export type Config = {
 	routing?: Record<string, string>;
 	adapters?: { backlog?: { sync?: string; add?: string; done?: string } };
 	timeoutMinutes?: number;
+ backlogIdentity?: string;
 };
 
 export function parse(md: string): Item[] {
@@ -308,7 +311,15 @@ export class Backlog {
 	get file() {
 		return path.join(this.root, "todos.md");
 	}
-	get source() {
+	get identity() {
+  if (!this.adapter?.sync) return `file:${this.file}`;
+  if (this.adapter.done?.includes('github/') && !process.env.NOODLE_GH_REPO) throw new Error('Set NOODLE_GH_REPO explicitly for durable GitHub completion.');
+  if (!/github\/|jira\/|linear\//.test(this.adapter.done ?? '') && !this.cfg.backlogIdentity) throw new Error('Custom durable backlog requires stable backlogIdentity in .noodle.json.');
+  const env = Object.fromEntries(['NOODLE_GH_REPO','NOODLE_GH_LABEL','JIRA_URL','JIRA_EMAIL','NOODLE_JIRA_PROJECT','NOODLE_JIRA_JQL','NOODLE_JIRA_DONE','NOODLE_LINEAR_TEAM','NOODLE_LINEAR_LABEL'].map(k=>[k,process.env[k] ?? '']));
+  const scripts=Object.entries(this.adapter).map(([k,v])=>[k,v,fs.existsSync(path.resolve(this.root,v)) ? fs.readFileSync(path.resolve(this.root,v),'utf8') : '']);
+  return createHash('sha256').update(JSON.stringify({root:fs.realpathSync(this.root),adapter:scripts,env,identity:this.cfg.backlogIdentity ?? ''})).digest('hex');
+ }
+ get source() {
 		return this.adapter?.sync ? `adapter: ${this.adapter.sync}` : this.file;
 	}
 	async items(signal?: AbortSignal): Promise<Item[]> {
@@ -351,7 +362,7 @@ export function loadConfig(root: string): Config {
 const PKG = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const ALIASES: Record<string, string> = { plan: "noodle-plan", run: "noodle-execute", review: "noodle-review" };
 const USAGE =
-	"Usage: /noodle status | add <text> | plan [id] | run <id> | review <id> | do <skill> <id|-> | merge <id> | loop [n] [--parallel k] [--auto] [--merge] | stop | init <github|jira|linear>";
+	"Usage: /noodle status | add <text> | plan [id] | run <id> | review <id> | do <skill> <id|-> | merge <id> | loop [n] [--parallel k] [--auto] [--merge] | stop | recover | retry <id> | init <github|jira|linear>";
 const PI = () => process.env.NOODLE_PI ?? "pi";
 
 type Loop = { ctl: AbortController; running: Map<string, Next>; left: number; done: Promise<void> };
@@ -371,11 +382,12 @@ export default function (pi: ExtensionAPI) {
 	async function buildMise(ctx: ExtensionCommandContext, repo: Repo, backlog: Backlog, free: number) {
 		const base = await repo.base();
 		const items = (await backlog.items(loop?.ctl.signal)).filter((i) => !i.done);
+		const durable = new Journal(repo.dir).read();
 		const enriched = await Promise.all(
 			items.map(async (i) => {
 				const plan = i.plan ?? repo.findPlan(i.id);
 				const branch = (await repo.hasBranch(i.id)) ? { name: repo.branch(i.id), commits_ahead: await repo.ahead(i.id, base) } : undefined;
-				return { ...i, ...(plan && { plan, plan_complete: planComplete(fs.existsSync(repo.wtPath(i.id)) ? repo.wtPath(i.id) : repo.root, plan) }), ...(branch && { branch }) };
+				return { ...i, recovery: durable.merges[i.id] ?? null, ...(plan && { plan, plan_complete: planComplete(fs.existsSync(repo.wtPath(i.id)) ? repo.wtPath(i.id) : repo.root, plan) }), ...(branch && { branch }) };
 			}),
 		);
 		const task_types = skillsOf(ctx).flatMap((s) => {
@@ -388,6 +400,7 @@ export default function (pi: ExtensionAPI) {
 			active: [...(loop?.running.values() ?? [])],
 			free_slots: free,
 			recent_history: repo.history(),
+   durable_attempts: durable.attempts,
 			task_types,
 			routing: backlog.cfg.routing ?? {},
    available_skills: skillsOf(ctx).map(s => ({ name: s.name, description: s.description, path: s.filePath })),
@@ -396,26 +409,57 @@ export default function (pi: ExtensionAPI) {
 		return mise;
 	}
 
-	/** Serialized: one merge at a time against the main checkout. */
-	function merge(repo: Repo, backlog: Backlog, id: string, base: string) {
-		const p = mergeChain.then(async () => {
-			const item = (await backlog.items(loop?.ctl.signal)).find(i => i.id === id);
-			const plan = item?.plan ?? repo.findPlan(id);
-			if (plan && !planComplete(repo.wtPath(id), plan)) return "plan has incomplete phases; finish every phase before merging";
-			const err = await repo.merge(id, base);
-			if (!err) {
-				repo.record({ skill: "git-merge", id, ok: true });
-				await backlog.done(id, loop?.ctl.signal);
-			}
-			repo.record({ skill: "merge", id, ok: !err, ...(err && { error: err }) });
-			return err;
-		});
-		mergeChain = p.then(
-			() => undefined,
-			() => undefined,
-		);
-		return p;
-	}
+	/** Persist intent before Git, then reconcile remote completion independently. */
+ async function recover(repo: Repo, backlog: Backlog, signal?: AbortSignal, interrupted = false) {
+  const journal = new Journal(repo.dir);
+  if (interrupted) journal.interrupt();
+  for (const intent of Object.values(journal.read().merges)) {
+   if (intent.status === 'done' || intent.status === 'attention') continue;
+   if(intent.destination !== backlog.identity) throw new Error('Backlog destination changed; preserve state and restore original adapter identity before recovery.');
+   const contained = await git(repo.root, 'merge-base', '--is-ancestor', intent.head, intent.base);
+   if (contained.code !== 0) {
+    journal.merge({...intent,status:'attention',error:'Prepared merge is not in recorded base; inspect Git before retrying.'});
+    continue;
+   }
+   journal.merge({...intent,status:'backlog-pending'});
+   try {
+    await backlog.done(intent.item,signal);
+    journal.merge({...intent,status:'done'});
+    repo.record({skill:'merge',id:intent.item,ok:true,recovered:true});
+   } catch(e) {
+    journal.merge({...intent,status:'backlog-pending',error:String(e)});
+    throw e;
+   }
+  }
+ }
+ function merge(repo: Repo, backlog: Backlog, id: string, base: string) {
+  const p = mergeChain.then(async () => {
+   const journal=new Journal(repo.dir);
+   const previous=journal.read().merges[id];
+   if(previous?.status === 'done') return undefined;
+   if(previous?.status === 'backlog-pending') { await recover(repo,backlog,loop?.ctl.signal); return undefined; }
+   if(previous?.status === 'attention') return previous.error ?? 'Merge needs manual inspection';
+   const item=(await backlog.items(loop?.ctl.signal)).find(i=>i.id===id);
+   const plan=item?.plan ?? repo.findPlan(id);
+   if(plan && !planComplete(repo.wtPath(id),plan)) return 'plan has incomplete phases; finish every phase before merging';
+   const head=(await git(repo.root,'rev-parse',repo.branch(id))).out.trim();
+   if(!head) return 'No branch to merge';
+   if(!(await repo.ahead(id,base))) return `${repo.branch(id)} has no commits ahead of ${base}`;
+   journal.merge({item:id,base,head,destination:backlog.identity,status:'prepared'});
+   const err=await repo.merge(id,base);
+   if(err) { journal.clearMerge(id); return err; }
+   journal.merge({item:id,base,head,destination:backlog.identity,status:'backlog-pending'});
+   repo.record({skill:'git-merge',id,ok:true});
+   try {
+    await backlog.done(id,loop?.ctl.signal);
+    journal.merge({item:id,base,head,destination:backlog.identity,status:'done'});
+    repo.record({skill:'merge',id,ok:true});
+   } catch(e) { journal.merge({item:id,base,head,destination:backlog.identity,status:'backlog-pending',error:String(e)});throw e; }
+   return undefined;
+  });
+  mergeChain=p.then(()=>undefined,()=>undefined);
+  return p;
+ }
 
 	async function runStage(ctx: ExtensionCommandContext, repo: Repo, backlog: Backlog, next: Next, opts: { merge: boolean }, signal: AbortSignal) {
 		const cfg = backlog.cfg;
@@ -429,16 +473,23 @@ export default function (pi: ExtensionAPI) {
 		const model = next.model ?? cfg.routing?.[next.skill] ?? cfg.routing?.default ?? (ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined);
   const available = ctx.modelRegistry?.getAvailable();
   const identity = model ? (available ? resolveModelIdentity(model, available) : modelIdentity(model)) : undefined;
-  const implementation = [...repo.history(1000)].reverse().find(e => e.id === next.id && e.skill === "noodle-execute" && e.ok);
+  const currentHead = wt ? (await git(wt.path,"rev-parse","HEAD")).out.trim() : "";
+  const implementation = [...new Journal(repo.dir).read().attempts].reverse().find(a => a.item === next.id && a.skill === "noodle-execute" && a.status === "succeeded" && a.after === currentHead);
   const independent = !!identity && !!implementation?.modelIdentity && identity !== implementation.modelIdentity;
   if (next.skill === "noodle-review" && !independent) return repo.record({ ...next, ok: false, error: "Independent review requires a known model different from the successful implementation model; configure routing.noodle-review." });
 		const args = ["-p", "--no-session", "--no-extensions", "--no-skills", "--skill", path.join(PKG, "skills"), ...childSkillArgs(ctx), ...(model ? ["--model", model] : []), stagePrompt(next.skill, item && { ...item, ...(plan && { plan }) }, wt, backlog.source)];
 		const log = path.join(repo.dir, "logs", `${Date.now()}-${next.skill}-${next.id === "-" ? "standalone" : safeId(next.id)}.log`);
+		const journal=new Journal(repo.dir);
 		const before = wt ? (await git(wt.path, "rev-parse", "HEAD")).out.trim() : "";
+  const prior=[...journal.read().attempts].reverse().find(a=>a.item===next.id && a.skill===next.skill && a.status==='succeeded' && a.after===before);
+  if(prior && next.skill==='noodle-execute' && (!plan || planComplete(wt!.path,plan))) return repo.record({...next,ok:true,reused:true,modelIdentity:prior.modelIdentity});
+		const attempt = journal.start({item:next.id,skill:next.skill,before,modelIdentity:identity,log});
 		const r = await run(PI(), args, { cwd: wt?.path ?? repo.root, signal, timeoutMs: (cfg.timeoutMinutes ?? 60) * 60_000, log });
 		const v = next.skill === "noodle-review" ? verdict(r.out) : undefined;
-		if (next.skill === "noodle-review" && plan && wt && !planComplete(wt.path, plan)) return repo.record({ ...next, ok: false, error: "plan has incomplete phases" });
-		const ok = r.code === 0 && !signal.aborted && (next.skill !== "noodle-review" || v === "PASS") && (next.skill !== "noodle-execute" || !item || (await git(wt!.path, "rev-parse", "HEAD")).out.trim() !== before);
+		if (next.skill === "noodle-review" && plan && wt && !planComplete(wt.path, plan)) { journal.finish(attempt,{status:"failed",error:"plan has incomplete phases"}); return repo.record({ ...next, ok: false, error: "plan has incomplete phases" }); }
+		const after = wt ? (await git(wt.path,"rev-parse","HEAD")).out.trim() : "";
+		const ok = r.code === 0 && !signal.aborted && (next.skill !== "noodle-review" || after === before) && (next.skill !== "noodle-review" || v === "PASS") && (next.skill !== "noodle-execute" || !item || (await git(wt!.path, "rev-parse", "HEAD")).out.trim() !== before);
+		journal.finish(attempt,{status:ok ? "succeeded" : "failed",after,verdict:v});
 		repo.record({ ...next, ...(model && { model }), ...(identity && { modelIdentity: identity }), ok, ...(v && { verdict: v }), log, summary: r.out.trim().slice(-400) });
 		if (ok && item && v === "PASS" && opts.merge) {
 			const err = await merge(repo, backlog, item.id, base);
@@ -471,8 +522,9 @@ export default function (pi: ExtensionAPI) {
 					if (r.code !== 0) throw new Error(`scheduler failed (see ${log})`);
 					const nexts = nextDirectives(r.out) ?? [];
 					const seen = new Set(l.running.keys());
+     const recoveryState = new Journal(repo.dir).read();
 					const pick = nexts.filter((n) => {
-						if (!known.has(n.skill) || seen.has(n.id)) return false;
+						if (!known.has(n.skill) || seen.has(n.id) || recoveryState.merges[n.id] || recoveryState.attempts.some(a => a.item === n.id && a.status === 'interrupted')) return false;
 						seen.add(n.id);
 						return true;
 					}).slice(0, free);
@@ -525,7 +577,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("noodle", {
 		description: "Noodle skill loop: status | add | plan [id] | run | review | do | merge | loop | stop | init",
 		getArgumentCompletions: (prefix) => {
-			const items = ["status", "add", "plan", "run", "review", "do", "merge", "loop", "stop", "init"].filter((s) => s.startsWith(prefix)).map((value) => ({ value, label: value }));
+			const items = ["status", "add", "plan", "run", "review", "do", "merge", "loop", "stop", "init", "recover", "retry"].filter((s) => s.startsWith(prefix)).map((value) => ({ value, label: value }));
 			return items.length ? items : null;
 		},
 		handler: async (args, ctx) => {
@@ -537,8 +589,10 @@ export default function (pi: ExtensionAPI) {
 
 			try {
 				if (cmd === "status") {
+					const state=new Journal(repo.dir).read();
 					const open = (await backlog.items()).filter((i) => !i.done);
 					const lines = open.length ? open.map((i) => `#${i.id} ${i.title}`) : [`No open items (${backlog.source})`];
+					lines.push(`Recovery: ${state.attempts.filter(a=>a.status==='interrupted' || a.status==='running').length} interrupted/running; ${Object.values(state.merges).filter(m=>m.status==='backlog-pending').length} backlog pending`);
 					if (loop) lines.push(`Loop: ${[...loop.running.values()].map((n) => `${n.skill} #${n.id}`).join(", ") || "scheduling"}; ${loop.left} stage(s) left`);
 					return ctx.ui.notify(lines.join("\n"), "info");
 				}
@@ -571,7 +625,24 @@ export default function (pi: ExtensionAPI) {
 					try { err = await merge(repo, backlog, id, await repo.base()); } finally { release(); }
 					return ctx.ui.notify(err ? `Merge failed: ${err}` : `Merged ${repo.branch(id)} and marked #${id} done`, err ? "warning" : "info");
 				}
-				if (cmd === "loop") {
+				if (cmd === "retry") {
+     const id=rest[0]?.replace(/^#/, '');
+     if(!id) return ctx.ui.notify('Usage: /noodle retry <id> (after inspecting interrupted worktree)', 'warning');
+     safeId(id);
+     const release=acquireOwnership(repo);
+     try {
+      const journal=new Journal(repo.dir);
+      journal.interrupt();
+      for(const a of journal.read().attempts.filter(a=>a.item===id && a.status==='interrupted')) journal.acknowledge(a.id);
+     } finally { release(); }
+     return ctx.ui.notify(`Interrupted #${id} acknowledged; next loop may retry after your inspection.`, 'info');
+    }
+    if (cmd === "recover") {
+     const release=acquireOwnership(repo);
+     try { await recover(repo,backlog,undefined,true); } finally { release(); }
+     return ctx.ui.notify('Recovery inspected interrupted attempts and reconciled pending backlog updates.','info');
+    }
+    if (cmd === "loop") {
 					if (!ctx.isIdle()) return ctx.ui.notify("Agent busy; wait until idle.", "warning");
 					if (loop) return ctx.ui.notify("Loop already running; /noodle stop first.", "warning");
 					const num = (flag: string) => Number(rest[rest.indexOf(flag) + 1]);
@@ -585,7 +656,7 @@ export default function (pi: ExtensionAPI) {
 					const release = acquireOwnership(repo);
 					const l: Loop = { ctl: new AbortController(), running: new Map(), left: n, done: Promise.resolve() };
 					loop = l;
-					l.done = loopBody(ctx, repo, backlog, l, opts)
+					l.done = recover(repo,backlog,l.ctl.signal,true).then(() => loopBody(ctx, repo, backlog, l, opts))
 						.catch((e) => ctx.ui.notify(`Noodle loop failed: ${e}`, "error"))
 						.finally(() => {
 							release();

@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.6.0]
+
+- Atomic, fsynced attempt journal with before/after commits, model identity and verdict evidence.
+- Lost running attempts become interrupted and require inspected `/noodle retry <id>` acknowledgment before loop dispatch.
+- Persist merge intent before Git and reconcile pending backlog closure using saved commit ancestry, without rerunning implementation.
+- Bind recovery to a stable backlog destination fingerprint; reject changed adapters/destinations.
+- Jira completion succeeds idempotently when already in the requested terminal state.
+- Independent review uses durable successful execution evidence at the exact reviewed HEAD.
+
 ## [0.5.0]
 
 - Forward parent domain skill paths into isolated workers; plan/execute/review explicitly load applicable domain guidance.

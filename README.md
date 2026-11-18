@@ -27,6 +27,8 @@ pi --no-extensions -e ./pi-noodle --skill ./pi-noodle/skills
 | `/noodle do <skill> <id\|->` | Run a loaded skill for an item, or `-` without one |
 | `/noodle loop [n] [--parallel k] [--auto] [--merge]` | Run at most `n` stages (default 5), at most `k` concurrent workers (default 1) |
 | `/noodle stop` | Abort current loop workers |
+| `/noodle recover` | Mark lost attempts interrupted; retry pending backlog closure after Git ancestry/destination checks |
+| `/noodle retry <id>` | Acknowledge interrupted work after inspecting it, allowing a fresh loop attempt |
 | `/noodle merge <id>` | Explicitly merge branch and mark item done |
 | `/noodle init <github\|jira\|linear>` | Copy adapter scripts into project and configure `.noodle.json` |
 
@@ -49,8 +51,16 @@ pi --no-extensions -e ./pi-noodle --skill ./pi-noodle/skills
 - Backlog item becomes done only after merge, not after implementation.
 - `.noodle/mise.json`: backlog, plan paths, item branches, active workers, available slots, routing and schedulable skills. `.noodle/history.jsonl`: stage/merge results. `.noodle/logs/`: worker logs. Runtime directory self-gitignored.
 - Scheduler decisions are model judgments, not dependency proofs. Use conservative concurrency for related items.
-- Loop state is in memory, not restart-resumable. Committed branches, worktrees, history and logs survive. Session shutdown aborts and drains the loop. Unix workers use process-group TERM followed by KILL after one second; adapter commands have a 60-second timeout and loop cancellation. Windows currently terminates only the direct child, not its entire process tree.
+- Worker processes are not adopted after restart. `.noodle/state.json` durably checkpoints attempts (before/after commits, model identity, verdict) and merge intents. Lost running attempts become interrupted, not successful. Session shutdown aborts and drains the loop. Unix workers use process-group TERM followed by KILL after one second; adapter commands have a 60-second timeout and loop cancellation. Windows currently terminates only the direct child, not its entire process tree.
 - Logs can include source/task content; treat them as private. Do not put secrets in task descriptions.
+
+## Recovery
+
+Loop startup reconciles saved state before scheduling. After a crash, first inspect `.noodle/owner.lock/owner.json` and ensure no prior processes remain before removing a stale ownership lock. Run `/noodle recover`; interrupted work is blocked until `/noodle retry <id>` explicitly acknowledges inspection. Successful current-HEAD execute evidence can be reused rather than reimplemented. This is checkpoint-based safe restart, not process adoption or a full persistent orders/DAG engine.
+
+Merge intent is saved before Git. If the recorded commit is already in the recorded base, recovery retries **only** backlog completion. If ancestry is missing, the item enters `attention` and requires manual Git inspection. Already completed intents are not repeated. Remote completion must be idempotent because a crash may occur after the API side effect but before checkpointing.
+
+Recovery is bound to the original destination fingerprint. Set `NOODLE_GH_REPO=owner/repo` explicitly for GitHub. Custom adapters require a stable `backlogIdentity` in `.noodle.json` (include account/project identifiers, not secrets) and idempotent `done`. Script/config/destination changes block replay; restore the original settings or inspect/migrate state manually. Do not delete journal evidence to force a retry.
 
 ## Routing
 
@@ -89,7 +99,7 @@ Default source: project-root `todos.md`, Noodle numbered checkbox format:
 | Jira Cloud | `JIRA_URL`, `JIRA_EMAIL`, `JIRA_TOKEN`; optional `NOODLE_JIRA_JQL`, `NOODLE_JIRA_DONE` (default `Done`); creation requires `NOODLE_JIRA_PROJECT`, optional `NOODLE_JIRA_TYPE` |
 | Linear | `LINEAR_API_KEY`, `NOODLE_LINEAR_TEAM`; optional `NOODLE_LINEAR_LABEL` (default `noodle`, empty selects all) |
 
-Store credentials in your shell/secret manager, not Git. Existing label must exist on GitHub and Linear; Linear creation attaches that label so newly added items remain discoverable. Jira transition must be available for each issue. Sources currently return a bounded first page (GitHub/Linear 200, Jira 100); narrow filters for larger queues. Live Jira/Linear mutations require testing against your project's workflows.
+Store credentials in your shell/secret manager, not Git. Existing label must exist on GitHub and Linear; Linear creation attaches that label so newly added items remain discoverable. `NOODLE_JIRA_DONE` names the target status, never a transition name. Jira must expose a transition into that status for open issues; already-target-status issues return success. Sources currently return a bounded first page (GitHub/Linear 200, Jira 100); narrow filters for larger queues. Live Jira/Linear mutations require testing against your project's workflows.
 
 Custom adapter contract:
 
