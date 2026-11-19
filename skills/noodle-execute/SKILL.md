@@ -36,6 +36,12 @@ Never edit the main checkout: concurrent sessions cause conflicts and lost work.
 
 Skip the worktree only if the user explicitly chooses to work on main in an interactive session.
 
+Stale worktree triage (run `git worktree list` before creating one; crashed sessions leave artifacts):
+
+1. No commits ahead of base, or `git cherry <base> <branch>` shows only `-` lines (patch-equivalent), and clean tree: safe to `git worktree remove` + `git branch -d`.
+2. Unmerged commits: report to the user, who decides merge or discard. Never discard (`-D`, `--force`) on your own.
+3. Dirty tree: never remove; report it.
+
 ### Delegation
 
 - **Self-execute**: one change, or tightly coupled changes (shared types, sequential dependencies).
@@ -54,7 +60,12 @@ Before every commit run this project's full checks: discover them from `package.
 
 ## 5. Commit
 
-`<type>(<scope>): <description>`; types `feat`, `fix`, `refactor`, `test`, `docs`, `chore`. One commit per logical change. Follow the repo's own convention if it differs.
+`<type>(<scope>): <description>`; types `feat`, `fix`, `refactor`, `test`, `docs`, `chore`. One commit per logical change; unrelated fixes never share a commit.
+
+- Always include a body (what and why); no title-only commits.
+- Stage only files you changed, by explicit path (`git add <path>`), never `git add -A` or `.`: concurrent sessions leave unrelated files behind.
+- Sequence commits so foundations land first, then the features that build on them.
+- Follow the repo's own convention (type list, gitmoji, language) if it differs.
 
 ## 6. Report
 
