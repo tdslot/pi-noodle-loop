@@ -375,10 +375,26 @@ export default function (pi: ExtensionAPI) {
 	let manual: { skill: string; id: string; root: string; release: () => void } | undefined;
 	let mergeChain = Promise.resolve();
  let disposeWorkflow: (()=>void) | undefined;
- pi.on('session_start',async(_e:any,ctx:ExtensionContext)=>{const sid=ctx.sessionManager?.getSessionId?.();if(!sid)return;disposeWorkflow?.();try{disposeWorkflow=registerNoodleWorkflowResource(sid);}catch(e){ctx.ui?.notify?.(`Noodle native workflow unavailable: ${e instanceof Error?e.message:e}`,'warning');}});
+ pi.on('session_start',async(_e:any,ctx:ExtensionContext)=>{const sid=ctx.sessionManager?.getSessionId?.();if(!sid)return;disposeWorkflow?.();try{disposeWorkflow=registerNoodleWorkflowResource(sid);}catch(e){ctx.ui?.notify?.(`Noodle native workflow unavailable: ${e instanceof Error?e.message:e}`,'warning');}
+  // Reconcile an earlier native launch (e.g. Pi restarted): finalize only through the same terminal-proof gate.
+  try{
+   const owner=new NativeOwnership(ctx.cwd);const lease=owner.read();
+   if(lease){
+    if(!lease.runId){ctx.ui?.notify?.('Native ownership lock without run ID (launch interrupted). Inspect `.noodle/owner.lock`; no automatic unlock.','warning');}
+    else if(!nativeRuns.has(lease.runId)){nativeRuns.set(lease.runId,{owner,lease,ctx:ctx as any});
+     finalizeNative(lease.runId).catch(e=>ctx.ui?.notify?.(`Native recovery failed; ownership retained: ${e}`,'error'));}
+   }
+  }catch(e){ctx.ui?.notify?.(`Native ownership record unreadable; preserved: ${e}`,'warning');}
+ });
  const nativeRuns=new Map<string,{owner:NativeOwnership;lease:import('./native.ts').NativeLease;ctx:ExtensionCommandContext;asyncDir?:string;finalizing?:boolean}>();
  const requestRuns=new Map<string,string>();
  const earlyCompletions=new Map<string,{runId:string;asyncDir?:string}>();
+ const recoveryTimers=new Map<string,ReturnType<typeof setTimeout>>();
+ let sessionActive=true;
+ const scheduleRecovery=(runId:string)=>{
+  if(!sessionActive||recoveryTimers.has(runId))return;
+  const timer=setTimeout(()=>{recoveryTimers.delete(runId);void finalizeNative(runId).catch(()=>{});},30000);timer.unref?.();recoveryTimers.set(runId,timer);
+ };
  const finalizeNative=async (runId:string,asyncDir?:string)=>{
   const tracked=nativeRuns.get(runId);if(!tracked||tracked.finalizing)return;
   tracked.finalizing=true;
@@ -393,21 +409,24 @@ export default function (pi: ExtensionAPI) {
    if(status?.runId!==runId) throw new Error('Native status run ID mismatch');
    if(dir && status?.asyncDir && path.resolve(dir)!==path.resolve(status.asyncDir)) throw new Error('Native status asyncDir mismatch');
    tracked.asyncDir=status?.asyncDir ?? dir;
-  }catch(e){tracked.ctx.ui.notify(`Native status unavailable; ownership retained: ${e}`,'warning');tracked.finalizing=false;return;}
+  }catch(e){tracked.ctx.ui.notify(`Native status unavailable; ownership retained: ${e}`,'warning');tracked.finalizing=false;
+   scheduleRecovery(runId);return;}
   const finalProof=status?.workflowTerminalProof ?? status?.details?.workflowTerminalProof;
   if(!finalProof || !workflowTerminalObserved(finalProof,runId,tracked.lease.items.length*2)){
    try{tracked.owner.save({...tracked.lease,status:finalProof?.state==='unknown'?'uncertain':'running'});}catch{/* lock stays as is; fail closed */}
-   tracked.ctx.ui.notify(`Native workflow terminal evidence is ${finalProof?.state ?? 'missing'} (dispatchClosed=${finalProof?.dispatchClosed ?? false}); ownership remains retained.`,`warning`);tracked.finalizing=false;return;
+   tracked.ctx.ui.notify(`Native workflow terminal evidence is ${finalProof?.state ?? 'missing'} (dispatchClosed=${finalProof?.dispatchClosed ?? false}); ownership remains retained.`,`warning`);tracked.finalizing=false;
+   scheduleRecovery(runId);return;
   }
-  nativeRuns.delete(runId);
   try{
    const result=await verifyNativeResult(tracked.owner.root,tracked.lease);
-   if(!result.ok){tracked.owner.save({...tracked.lease,status:'terminal'});pi.sendMessage({customType:'noodle-native-evidence',content:`Native workflow ${runId} finished but Git verification failed; ownership retained.\n${result.lines.join('\n')}`,display:true},{triggerTurn:false});tracked.ctx.ui.notify('Native Git verification failed; ownership retained for inspection.','error');return;}
+   if(!result.ok){tracked.owner.save({...tracked.lease,status:'terminal'});nativeRuns.delete(runId);pi.sendMessage({customType:'noodle-native-evidence',content:`Native workflow ${runId} finished but Git verification failed; ownership retained.\n${result.lines.join('\n')}`,display:true},{triggerTurn:false});tracked.ctx.ui.notify('Native Git verification failed; ownership retained for inspection.','error');return;}
    fs.writeFileSync(path.join(tracked.owner.root,'.noodle',`native-result-${tracked.lease.token}.json`),JSON.stringify({runId,observedAt:finalProof.observedAt,...result},null,2));
    pi.sendMessage({customType:'noodle-native-evidence',content:`Native workflow ${runId} terminated with observed proof for ${finalProof.children.length} children.\n${result.lines.join('\n')}`,display:true},{triggerTurn:false});
    tracked.owner.release(tracked.lease);
+   nativeRuns.delete(runId);
+   const timer=recoveryTimers.get(runId);if(timer)clearTimeout(timer);recoveryTimers.delete(runId);
    tracked.ctx.ui.notify('Native workflow stopped; repository ownership released.','info');
-  }catch(e){if(tracked.owner.read?.()?.token===tracked.lease.token)tracked.owner.save({...tracked.lease,status:'terminal'});tracked.ctx.ui.notify(`Native verification failed; ownership retained: ${e}`,'error');}
+  }catch(e){if(tracked.owner.read?.()?.token===tracked.lease.token)tracked.owner.save({...tracked.lease,status:'terminal'});nativeRuns.delete(runId);tracked.ctx.ui.notify(`Native verification failed; ownership retained for manual inspection: ${e}`,'error');}
  };
  const noticeNative=(runId:string,asyncDir?:string)=>{
   const tracked=nativeRuns.get(runId) ?? [...nativeRuns.values()].find(x=>x.lease.requestId===runId);
@@ -615,7 +634,7 @@ export default function (pi: ExtensionAPI) {
 		ctx.ui.notify(`Noodle loop stopped: ${why}`, "info");
 	}
 
-	pi.on("session_shutdown", async () => { disposeWorkflow?.(); disposeWorkflow=undefined; if (loop) { loop.ctl.abort(); await loop.done; } manual?.release(); manual = undefined; });
+	pi.on("session_shutdown", async () => { sessionActive=false;for(const timer of recoveryTimers.values())clearTimeout(timer);recoveryTimers.clear(); disposeWorkflow?.(); disposeWorkflow=undefined; if (loop) { loop.ctl.abort(); await loop.done; } manual?.release(); manual = undefined; });
 
 	pi.on("agent_settled", async (event) => {
 		if (!manual) return;
