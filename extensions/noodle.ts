@@ -415,7 +415,7 @@ export default function (pi: ExtensionAPI) {
   const finalProof=status?.workflowTerminalProof ?? status?.details?.workflowTerminalProof;
   if(!finalProof || !workflowTerminalObserved(finalProof,runId,tracked.lease.items.length*2)){
    try{tracked.owner.save({...tracked.lease,status:finalProof?.state==='unknown'?'uncertain':'running'});}catch{/* lock stays as is; fail closed */}
-   tracked.ctx.ui.notify(`Native workflow terminal evidence is ${finalProof?.state ?? 'missing'} (dispatchClosed=${finalProof?.dispatchClosed ?? false}); ownership remains retained.`,`warning`);tracked.finalizing=false;
+   tracked.ctx.ui.notify(`Native workflow terminal evidence is ${finalProof?.state ?? 'missing'} (dispatchClosed=${finalProof?.dispatchClosed ?? false}); ownership remains retained.${['complete','completed','failed','stopped'].includes(status?.state)?` Workflow state is ${status.state} but a child process-terminal.json may be stuck pending (e.g. host reload); inspect child proofs and release the lock manually only after Git verification.`:''}`,`warning`);tracked.finalizing=false;
    scheduleRecovery(runId);return;
   }
   try{
