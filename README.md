@@ -58,11 +58,13 @@ pi --no-extensions -e ./pi-noodle --skill ./pi-noodle/skills
 
 ## Native background delegation
 
-`/noodle bg 4` first requires a Git repository root, an existing local or adapter backlog with open tasks, and `pi-subagents` agents `worker` and `reviewer` (their models are configured there). Missing requirements reject launch before native registration; no task/config files are created automatically. Subdirectories and `~` are not inferred or redirected to another repository. It uses pi-subagents' public runtime-agent registration and event-bus spawn API. It requires pi-subagents loaded in the parent Pi session. No separate Noodle job registry, polling loop, fleet implementation or process dashboard is installed. If native launch fails or its reply is lost, inspect native status; do not redispatch blindly and never fall back to an unmanaged process.
+`/noodle bg 4` first requires a Git repository root, an existing local or adapter backlog with open tasks, and `pi-subagents` agents `worker` and `reviewer`. Native models are explicitly passed from project routing and must resolve to distinct available model IDs. Missing requirements reject launch before native registration; no task/config files are created automatically. Subdirectories and `~` are not inferred or redirected to another repository. It uses pi-subagents' public runtime-agent registration and event-bus spawn API. It requires pi-subagents loaded in the parent Pi session. No separate Noodle job registry, polling loop, fleet implementation or process dashboard is installed. If native launch fails or its reply is lost, inspect native status; do not redispatch blindly and never fall back to an unmanaged process.
 
 `/noodle bg N` (1-8) starts one native `pi-subagents` workflow: for each of the first N open items, sequentially, a `worker` implements in `.noodle/worktrees/<id>` on branch `noodle/<id>` and a `reviewer` reviews it. It never starts a standalone Pi CLI loop; run lifecycle and child evidence belong to pi-subagents. This path does not claim the standalone `/noodle loop` journal/recovery guarantees. Pi's existing subagent TUI shows its task/tool/activity; native completion delivers results to the original parent so it can continue. Use normal subagent status, transcript, stop and interrupt controls for that native run. `/noodle jobs` delegates to the same native status API. `/noodle status` still describes the current repository only.
 
 Background delegation explicitly authorizes unattended stage selection (`--auto`). Native `--merge` is currently rejected: structural phase/review attestation is not implemented yet. Inspect branches and use an explicitly approved manual merge; no pushes. Session ownership, output, run retention and wake policy belong to pi-subagents. Noodle still owns its repository-specific execution/checkpoint policy, not an independent background-job manager.
+
+Legacy native runs saved without explicit model fields cannot resolve under this version and remain fail-closed. Before upgrading an active run, let it finish. For interrupted legacy runs, inspect child termination proofs and Git state before any manual lock removal or relaunch; old arguments are not migrated automatically.
 
 ### Native ownership and verified results
 
@@ -80,7 +82,7 @@ Recovery is bound to the original destination fingerprint. Set `NOODLE_GH_REPO=o
 
 ## Routing
 
-`/noodle bg` (native) needs no model config: workers and reviewers use `pi-subagents` agent definitions and defaults (`worker`, `reviewer`). Routing below applies only to the standalone `/noodle start` loop.
+`/noodle bg` requires `routing.noodle-review`. Its implementation model comes from `routing.noodle-execute`, then `routing.default`, then the current session model. Both must resolve to unambiguous available model IDs and must differ (thinking-level suffixes do not make a model independent). Validation happens before lock acquisition or launch; agent defaults cannot override the explicit models. Example: `github-copilot/gpt-6-luna` for execute and `github-copilot/gpt-6-sol` for review. This checks configured identities, not post-run model attestation; native `--merge` remains disabled.
 
 Project `.noodle.json` (optional):
 

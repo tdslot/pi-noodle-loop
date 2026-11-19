@@ -3,8 +3,8 @@ export const NOODLE_WORKFLOW = `
 const tasks = "__TASKS__";
 const results = [];
 for (const [i, t] of tasks.entries()) {
-  const impl = await runs.run("impl" + i, { agent: "worker", task: t.impl });
-  const review = await runs.run("review" + i, { agent: "reviewer", task: t.review });
+  const impl = await runs.run("impl" + i, { agent: "worker", task: t.impl, model: t.implModel });
+  const review = await runs.run("review" + i, { agent: "reviewer", task: t.review, model: t.reviewModel });
   results.push({ impl: impl.output, review: review.output });
 }
 return results;

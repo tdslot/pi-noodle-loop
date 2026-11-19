@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { NOODLE_WORKFLOW } from './workflow-template.ts';
+import { nativeModels } from './models.ts';
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { registerWorkflowResource } from 'pi-subagents/workflow-resources';
 
@@ -30,15 +31,16 @@ function itemTasks(pkg: string, cwd: string, item: NoodleItem) {
 }
 
 export const MAX_NATIVE_ITEMS = 8;
-export function workflowArgs(pkg: string, cwd: string, items: NoodleItem[]) {
- return { tasks: JSON.stringify(items.map((i) => itemTasks(pkg, cwd, i))) };
+export function workflowArgs(pkg: string, cwd: string, items: NoodleItem[], models: {implModel:string;reviewModel:string}) {
+ return { tasks: JSON.stringify(items.map((i) => ({...itemTasks(pkg, cwd, i),...models}))) };
 }
 
 /** Register through pi-subagents' public lifecycle API so its registry gets created before recovery. */
-export function registerNoodleWorkflowResource(sessionId:string):()=>void{
+export function registerNoodleWorkflowResource(sessionId:string, available:()=>readonly {provider:string;id:string}[]|undefined=()=>undefined):()=>void{
  const registration=registerWorkflowResource({sessionId,definition:{name:'noodle.item',version:1,resolve:(a:Record<string,unknown>)=>{
   let tasks:any;try{tasks=JSON.parse(a.tasks as string);}catch{/* rejected below */}
-  if(Object.keys(a).join()!=='tasks'||!Array.isArray(tasks)||tasks.length<1||tasks.length>MAX_NATIVE_ITEMS||tasks.some((t:any)=>typeof t?.impl!=='string'||!t.impl.trim()||typeof t?.review!=='string'||!t.review.trim()||Object.keys(t).length!==2)) return {error:'noodle.item args must be {tasks} with 1-'+MAX_NATIVE_ITEMS+' non-empty impl/review pairs.'};
+  if(Object.keys(a).join()!=='tasks'||!Array.isArray(tasks)||tasks.length<1||tasks.length>MAX_NATIVE_ITEMS||tasks.some((t:any)=>typeof t?.impl!=='string'||!t.impl.trim()||typeof t?.review!=='string'||!t.review.trim()||typeof t?.implModel!=='string'||!t.implModel.trim()||typeof t?.reviewModel!=='string'||!t.reviewModel.trim()||t.implModel===t.reviewModel||Object.keys(t).length!==4)) return {error:'noodle.item args must be {tasks} with 1-'+MAX_NATIVE_ITEMS+' non-empty impl/review pairs with distinct implModel/reviewModel.'};
+  try{const models=available();tasks=tasks.map((t:any)=>({...t,...nativeModels({'noodle-execute':t.implModel,'noodle-review':t.reviewModel},undefined,models)}));}catch(e){return {error:e instanceof Error?e.message:String(e)};}
   const script=NOODLE_WORKFLOW.replace('"__TASKS__"',()=>JSON.stringify(tasks));
   return {script};
  }}});
