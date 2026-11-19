@@ -80,6 +80,8 @@ Recovery is bound to the original destination fingerprint. Set `NOODLE_GH_REPO=o
 
 ## Routing
 
+`/noodle bg` (native) needs no model config: workers and reviewers use `pi-subagents` agent definitions and defaults (`worker`, `reviewer`). Routing below applies only to the standalone `/noodle start` loop.
+
 Project `.noodle.json` (optional):
 
 ```json

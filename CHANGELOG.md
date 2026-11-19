@@ -5,6 +5,8 @@
 - Hold exclusive repository ownership across native launch; coordinator terminal proof does not release ownership without descendant termination evidence.
 - Retain ownership on missing launch identity, uncertain launch, session shutdown or unknown terminal proof; no unsafe automatic unlock.
 - Persist verified Git result (launch base, authorized item branches/heads and dirty-worktree findings) and append evidence to parent context.
+- Native `/noodle bg` no longer reads `.noodle.json` routing or checks model distinctness; models come from `pi-subagents` agent settings.
+- Fix unlock: terminal proof check now passes expected child count; parent finalizes on `subagent-notify` / `subagent:async-complete`.
 - Disable native `--merge` until structural phase/review attestation is implemented; model prose is not merge authorization.
 
 ## [0.7.1]

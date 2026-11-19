@@ -27,6 +27,14 @@ export class NativeOwnership {
  }
  release(l:NativeLease){if(this.read()?.token!==l.token)throw new Error('Native ownership token mismatch');fs.rmSync(this.lock,{recursive:true});}
 }
+/** Release proof for a top-level native workflow: dispatch closed AND every roster child has observed process-terminal proof. */
+export function workflowTerminalObserved(proof:any,runId:string,expectedChildren:number):boolean{
+ return proof?.version===1&&proof.kind==='workflow'&&proof.runId===runId&&proof.state==='observed'&&proof.dispatchClosed===true&&typeof proof.observedAt==='number'
+  &&Array.isArray(proof.children)&&proof.children.length===expectedChildren&&proof.children.length>0&&proof.children.every((c:any)=>observedTerminal(c,c?.runId));
+}
+export function proofMatchesRun(proof:any,expectedRunId:string):boolean {
+ return typeof expectedRunId==='string'&&proof?.runId===expectedRunId;
+}
 /** Only exact native observed proof; completion prose/status alone is insufficient. */
 export function observedTerminal(value:any,runId:string):boolean{return value?.version===1&&value.runId===runId&&value.state==='observed'&&typeof value.observedAt==='number'&&Array.isArray(value.instances)&&value.instances.length>0;}
 export async function verifyNativeResult(root:string,lease:NativeLease):Promise<{ok:boolean;lines:string[]}>{
