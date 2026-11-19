@@ -639,8 +639,8 @@ export default function (pi: ExtensionAPI) {
 				if (cmd === "bg") {
      const count=Number(rest[0] ?? 5);
      const at=rest.indexOf('--parallel');
-     const parallel=at<0 ? 1 : Number(rest[at+1]);
-     if(!Number.isSafeInteger(count) || count<1 || count>100 || !Number.isSafeInteger(parallel) || parallel<1 || parallel>20) return ctx.ui.notify('Use /noodle bg 1-100 [--parallel 1-20] [--merge]','warning');
+     if(at>=0) return ctx.ui.notify('--parallel is not supported by native /noodle bg; items run sequentially.','warning');
+     if(!Number.isSafeInteger(count) || count<1 || count>MAX_NATIVE_ITEMS) return ctx.ui.notify(`Use /noodle bg 1-${MAX_NATIVE_ITEMS}`,'warning');
      const top=await git(ctx.cwd,'rev-parse','--show-toplevel');
      if(top.code || !top.out.trim()) throw new Error(`Not a Git repository: ${ctx.cwd}. Start Pi in an authorized project root.`);
      if(fs.realpathSync(top.out.trim()) !== fs.realpathSync(ctx.cwd)) throw new Error(`Start Pi at repository root: ${top.out.trim()}`);
@@ -649,7 +649,8 @@ export default function (pi: ExtensionAPI) {
      if(!items.length) throw new Error('No open backlog items; no subagent launched.');
      if(!disposeWorkflow) throw new Error('Native workflow resource is not registered for this session; reload Pi and check pi-subagents.');
      if(rest.includes('--merge')) throw new Error('Native automatic merge remains disabled until structural review/phase attestation is implemented; inspect branches and merge explicitly.');
-     const batch=items.slice(0,Math.min(count,MAX_NATIVE_ITEMS));
+     const batch=items.slice(0,count);
+     if(items.length>batch.length) ctx.ui.notify(`${items.length} open items; launching first ${batch.length}. Run again for the rest.`,'info');
      for(const i of batch) safeId(i.id);
      if(!(await git(ctx.cwd,'rev-parse','HEAD')).out.trim()) throw new Error('Repository needs a base commit.');
      const requestId=randomUUID();
