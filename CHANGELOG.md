@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+- Native `/noodle bg N` runs up to 8 open items in one sequential workflow (impl then review per item); unlock needs `2 x items` observed children. Items run one after another; `--parallel` is not used by the native path.
+- Harden finalize: flag reset on save failure, nested proof accepted, single tracked entry across requestId/runId.
+
 ## [0.8.0]
 
 - Hold exclusive repository ownership across native launch; coordinator terminal proof does not release ownership without descendant termination evidence.
