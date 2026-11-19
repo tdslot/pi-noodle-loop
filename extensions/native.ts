@@ -58,7 +58,7 @@ export async function verifyNativeResult(root:string,lease:NativeLease):Promise<
    if(dirty){ok=false;lines.push(`${branch}: uncommitted changes remain`);}
   }
  }
- if(!branches.some(b=>allowed.has(b))){ok=false;lines.push('No authorized item branch found; no implementation outcome verified.');}
+ for(const id of lease.items)if(!branches.includes(`noodle/${id}`)){ok=false;lines.push(`noodle/${id}: no branch; item outcome not verified`);}
  lines.push('Git evidence only: test results and independent review verdict are not structurally attested by this check. No merge authorization is issued.');
  return{ok,lines};
 }

@@ -1,6 +1,11 @@
-/** Source template for the named workflow. Resolve with JSON.stringify for every substituted literal; user task text is never interpolated raw. */
+/** Source template for the named workflow. Only one literal is substituted (JSON.stringify of a validated tasks array); task text is never interpolated raw. Items run sequentially: impl then review per item. */
 export const NOODLE_WORKFLOW = `
-const impl = await runs.run("impl", { agent: "worker", task: "__IMPLEMENTATION_TASK__" });
-const review = await runs.run("review", { agent: "reviewer", task: "__REVIEW_TASK__" });
-return { impl: impl.output, review: review.output };
+const tasks = "__TASKS__";
+const results = [];
+for (const [i, t] of tasks.entries()) {
+  const impl = await runs.run("impl" + i, { agent: "worker", task: t.impl });
+  const review = await runs.run("review" + i, { agent: "reviewer", task: t.review });
+  results.push({ impl: impl.output, review: review.output });
+}
+return results;
 `;

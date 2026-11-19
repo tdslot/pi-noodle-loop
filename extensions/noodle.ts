@@ -19,7 +19,7 @@ import { createHash } from "node:crypto";
 import { Journal } from "./state.ts";
 import { NativeOwnership, workflowTerminalObserved, verifyNativeResult } from "./native.ts";
 import { randomUUID } from "node:crypto";
-import { subagentRpc, workflowArgs, registerNoodleWorkflowResource } from "./subagents.ts";
+import { subagentRpc, workflowArgs, registerNoodleWorkflowResource, MAX_NATIVE_ITEMS } from "./subagents.ts";
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
@@ -387,7 +387,7 @@ export default function (pi: ExtensionAPI) {
   try{
    for(let i=0;i<6;i++){
     status=(await subagentRpc(pi,'status',{id:runId}))?.details;
-    if(workflowTerminalObserved(status?.workflowTerminalProof ?? status?.details?.workflowTerminalProof,runId,2)||i===5)break;
+    if(workflowTerminalObserved(status?.workflowTerminalProof ?? status?.details?.workflowTerminalProof,runId,tracked.lease.items.length*2)||i===5)break;
     await new Promise(r=>setTimeout(r,5000));
    }
    if(status?.runId!==runId) throw new Error('Native status run ID mismatch');
@@ -395,7 +395,7 @@ export default function (pi: ExtensionAPI) {
    tracked.asyncDir=status?.asyncDir ?? dir;
   }catch(e){tracked.ctx.ui.notify(`Native status unavailable; ownership retained: ${e}`,'warning');tracked.finalizing=false;return;}
   const finalProof=status?.workflowTerminalProof ?? status?.details?.workflowTerminalProof;
-  if(!finalProof || !workflowTerminalObserved(finalProof,runId,2)){
+  if(!finalProof || !workflowTerminalObserved(finalProof,runId,tracked.lease.items.length*2)){
    try{tracked.owner.save({...tracked.lease,status:finalProof?.state==='unknown'?'uncertain':'running'});}catch{/* lock stays as is; fail closed */}
    tracked.ctx.ui.notify(`Native workflow terminal evidence is ${finalProof?.state ?? 'missing'} (dispatchClosed=${finalProof?.dispatchClosed ?? false}); ownership remains retained.`,`warning`);tracked.finalizing=false;return;
   }
@@ -639,8 +639,8 @@ export default function (pi: ExtensionAPI) {
 				if (cmd === "bg") {
      const count=Number(rest[0] ?? 5);
      const at=rest.indexOf('--parallel');
-     const parallel=at<0 ? 1 : Number(rest[at+1]);
-     if(!Number.isSafeInteger(count) || count<1 || count>100 || !Number.isSafeInteger(parallel) || parallel<1 || parallel>20) return ctx.ui.notify('Use /noodle bg 1-100 [--parallel 1-20] [--merge]','warning');
+     if(at>=0) return ctx.ui.notify('--parallel is not supported by native /noodle bg; items run sequentially.','warning');
+     if(!Number.isSafeInteger(count) || count<1 || count>MAX_NATIVE_ITEMS) return ctx.ui.notify(`Use /noodle bg 1-${MAX_NATIVE_ITEMS}`,'warning');
      const top=await git(ctx.cwd,'rev-parse','--show-toplevel');
      if(top.code || !top.out.trim()) throw new Error(`Not a Git repository: ${ctx.cwd}. Start Pi in an authorized project root.`);
      if(fs.realpathSync(top.out.trim()) !== fs.realpathSync(ctx.cwd)) throw new Error(`Start Pi at repository root: ${top.out.trim()}`);
@@ -649,15 +649,16 @@ export default function (pi: ExtensionAPI) {
      if(!items.length) throw new Error('No open backlog items; no subagent launched.');
      if(!disposeWorkflow) throw new Error('Native workflow resource is not registered for this session; reload Pi and check pi-subagents.');
      if(rest.includes('--merge')) throw new Error('Native automatic merge remains disabled until structural review/phase attestation is implemented; inspect branches and merge explicitly.');
-     if(items.length!==1) throw new Error('Native structural workflow currently supports exactly one open item per launch; split the backlog or use the standalone loop.');
-     const item=items[0];safeId(item.id);
+     const batch=items.slice(0,count);
+     if(items.length>batch.length) ctx.ui.notify(`${items.length} open items; launching first ${batch.length}. Run again for the rest.`,'info');
+     for(const i of batch) safeId(i.id);
      if(!(await git(ctx.cwd,'rev-parse','HEAD')).out.trim()) throw new Error('Repository needs a base commit.');
      const requestId=randomUUID();
      const owner=new NativeOwnership(ctx.cwd);
-     const lease=await owner.acquire(ctx.sessionManager?.getSessionId?.() ?? 'unknown',[item.id],requestId);
+     const lease=await owner.acquire(ctx.sessionManager?.getSessionId?.() ?? 'unknown',batch.map(i=>i.id),requestId);
      try {
       nativeRuns.set(requestId,{owner,lease,ctx});
-      const result=await subagentRpc(pi,'spawn',{workflow:'noodle.item',args:workflowArgs(PKG,ctx.cwd,item),cwd:ctx.cwd,async:true},requestId);
+      const result=await subagentRpc(pi,'spawn',{workflow:'noodle.item',args:workflowArgs(PKG,ctx.cwd,batch),cwd:ctx.cwd,async:true},requestId);
       const runId=result?.details?.runId ?? result?.details?.workflowRunId ?? requestId;
       if(typeof runId!=='string'){nativeRuns.delete(requestId);owner.save({...lease,status:'uncertain'});throw new Error('Native launch reply lacks run ID; ownership retained. Inspect native status, do not relaunch.');}
       lease.runId=runId;lease.status='running';owner.save(lease);
