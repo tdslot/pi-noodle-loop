@@ -387,7 +387,7 @@ export default function (pi: ExtensionAPI) {
   try{
    for(let i=0;i<6;i++){
     status=(await subagentRpc(pi,'status',{id:runId}))?.details;
-    if(workflowTerminalObserved(status?.workflowTerminalProof,runId,2))break;
+    if(workflowTerminalObserved(status?.workflowTerminalProof ?? status?.details?.workflowTerminalProof,runId,2)||i===5)break;
     await new Promise(r=>setTimeout(r,5000));
    }
    if(status?.runId!==runId) throw new Error('Native status run ID mismatch');
@@ -396,7 +396,7 @@ export default function (pi: ExtensionAPI) {
   }catch(e){tracked.ctx.ui.notify(`Native status unavailable; ownership retained: ${e}`,'warning');tracked.finalizing=false;return;}
   const finalProof=status?.workflowTerminalProof ?? status?.details?.workflowTerminalProof;
   if(!finalProof || !workflowTerminalObserved(finalProof,runId,2)){
-   tracked.owner.save({...tracked.lease,status:finalProof?.state==='unknown'?'uncertain':'running'});
+   try{tracked.owner.save({...tracked.lease,status:finalProof?.state==='unknown'?'uncertain':'running'});}catch{/* lock stays as is; fail closed */}
    tracked.ctx.ui.notify(`Native workflow terminal evidence is ${finalProof?.state ?? 'missing'} (dispatchClosed=${finalProof?.dispatchClosed ?? false}); ownership remains retained.`,`warning`);tracked.finalizing=false;return;
   }
   nativeRuns.delete(runId);
@@ -660,7 +660,8 @@ export default function (pi: ExtensionAPI) {
       const result=await subagentRpc(pi,'spawn',{workflow:'noodle.item',args:workflowArgs(PKG,ctx.cwd,item),cwd:ctx.cwd,async:true},requestId);
       const runId=result?.details?.runId ?? result?.details?.workflowRunId ?? requestId;
       if(typeof runId!=='string'){nativeRuns.delete(requestId);owner.save({...lease,status:'uncertain'});throw new Error('Native launch reply lacks run ID; ownership retained. Inspect native status, do not relaunch.');}
-      nativeRuns.delete(requestId);lease.runId=runId;lease.status='running';owner.save(lease);nativeRuns.set(runId,{owner,lease,ctx});
+      lease.runId=runId;lease.status='running';owner.save(lease);
+      const entry=nativeRuns.get(requestId);if(entry){nativeRuns.delete(requestId);nativeRuns.set(runId,entry);}
       const completed=earlyCompletions.get(runId);if(completed){earlyCompletions.delete(runId);finalizeNative(runId,completed.asyncDir).catch(e=>ctx.ui.notify(`Native finalize failed; ownership retained: ${e}`,'error'));}
       ctx.ui.notify(typeof result?.text==='string' ? result.text : 'Native Noodle workflow launched; repository ownership remains until observed workflow termination proof.','info');
      }catch(e){owner.save({...lease,status:'uncertain'});throw e;}
