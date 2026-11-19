@@ -17,7 +17,9 @@
 
 import { createHash } from "node:crypto";
 import { Journal } from "./state.ts";
-import { subagentRpc, coordinatorTask } from "./subagents.ts";
+import { NativeOwnership, workflowTerminalObserved, verifyNativeResult } from "./native.ts";
+import { randomUUID } from "node:crypto";
+import { subagentRpc, workflowArgs, registerNoodleWorkflowResource } from "./subagents.ts";
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
@@ -372,7 +374,51 @@ export default function (pi: ExtensionAPI) {
 	let loop: Loop | undefined;
 	let manual: { skill: string; id: string; root: string; release: () => void } | undefined;
 	let mergeChain = Promise.resolve();
- let disposeAgent: (()=>void) | undefined;
+ let disposeWorkflow: (()=>void) | undefined;
+ pi.on('session_start',async(_e:any,ctx:ExtensionContext)=>{const sid=ctx.sessionManager?.getSessionId?.();if(!sid)return;disposeWorkflow?.();try{disposeWorkflow=registerNoodleWorkflowResource(sid);}catch(e){ctx.ui?.notify?.(`Noodle native workflow unavailable: ${e instanceof Error?e.message:e}`,'warning');}});
+ const nativeRuns=new Map<string,{owner:NativeOwnership;lease:import('./native.ts').NativeLease;ctx:ExtensionCommandContext;asyncDir?:string;finalizing?:boolean}>();
+ const requestRuns=new Map<string,string>();
+ const earlyCompletions=new Map<string,{runId:string;asyncDir?:string}>();
+ const finalizeNative=async (runId:string,asyncDir?:string)=>{
+  const tracked=nativeRuns.get(runId);if(!tracked||tracked.finalizing)return;
+  tracked.finalizing=true;
+  let status:any;
+  const dir=asyncDir ?? tracked.asyncDir;
+  try{
+   for(let i=0;i<6;i++){
+    status=(await subagentRpc(pi,'status',{id:runId}))?.details;
+    if(workflowTerminalObserved(status?.workflowTerminalProof,runId,2))break;
+    await new Promise(r=>setTimeout(r,5000));
+   }
+   if(status?.runId!==runId) throw new Error('Native status run ID mismatch');
+   if(dir && status?.asyncDir && path.resolve(dir)!==path.resolve(status.asyncDir)) throw new Error('Native status asyncDir mismatch');
+   tracked.asyncDir=status?.asyncDir ?? dir;
+  }catch(e){tracked.ctx.ui.notify(`Native status unavailable; ownership retained: ${e}`,'warning');tracked.finalizing=false;return;}
+  const finalProof=status?.workflowTerminalProof ?? status?.details?.workflowTerminalProof;
+  if(!finalProof || !workflowTerminalObserved(finalProof,runId,2)){
+   tracked.owner.save({...tracked.lease,status:finalProof?.state==='unknown'?'uncertain':'running'});
+   tracked.ctx.ui.notify(`Native workflow terminal evidence is ${finalProof?.state ?? 'missing'} (dispatchClosed=${finalProof?.dispatchClosed ?? false}); ownership remains retained.`,`warning`);tracked.finalizing=false;return;
+  }
+  nativeRuns.delete(runId);
+  try{
+   const result=await verifyNativeResult(tracked.owner.root,tracked.lease);
+   if(!result.ok){tracked.owner.save({...tracked.lease,status:'terminal'});pi.sendMessage({customType:'noodle-native-evidence',content:`Native workflow ${runId} finished but Git verification failed; ownership retained.\n${result.lines.join('\n')}`,display:true},{triggerTurn:false});tracked.ctx.ui.notify('Native Git verification failed; ownership retained for inspection.','error');return;}
+   fs.writeFileSync(path.join(tracked.owner.root,'.noodle',`native-result-${tracked.lease.token}.json`),JSON.stringify({runId,observedAt:finalProof.observedAt,...result},null,2));
+   pi.sendMessage({customType:'noodle-native-evidence',content:`Native workflow ${runId} terminated with observed proof for ${finalProof.children.length} children.\n${result.lines.join('\n')}`,display:true},{triggerTurn:false});
+   tracked.owner.release(tracked.lease);
+   tracked.ctx.ui.notify('Native workflow stopped; repository ownership released.','info');
+  }catch(e){if(tracked.owner.read?.()?.token===tracked.lease.token)tracked.owner.save({...tracked.lease,status:'terminal'});tracked.ctx.ui.notify(`Native verification failed; ownership retained: ${e}`,'error');}
+ };
+ const noticeNative=(runId:string,asyncDir?:string)=>{
+  const tracked=nativeRuns.get(runId) ?? [...nativeRuns.values()].find(x=>x.lease.requestId===runId);
+  if(!tracked){earlyCompletions.set(runId,{runId,asyncDir});if(earlyCompletions.size>32)earlyCompletions.delete(earlyCompletions.keys().next().value!);return;}
+  finalizeNative(tracked.lease.runId ?? runId,asyncDir).catch(e=>tracked.ctx.ui.notify(`Native finalize failed; ownership retained: ${e}`,'error'));
+ };
+ pi.events?.on('subagent:async-complete',(payload:any)=>{if(typeof payload?.runId==='string')noticeNative(payload.runId,payload.asyncDir);});
+ pi.on('message_end',(event:any)=>{
+  const m=event?.message;if(m?.role!=='custom'||m.customType!=='subagent-notify')return;
+  for(const r of m.details?.runs ?? []) if(typeof r?.runId==='string') noticeNative(r.runId,r.asyncDir);
+ });
 
 	const skillsOf = (ctx: ExtensionCommandContext) => ctx.getSystemPromptOptions?.().skills ?? [];
  const childSkillArgs = (ctx: ExtensionCommandContext) => {
@@ -569,7 +615,7 @@ export default function (pi: ExtensionAPI) {
 		ctx.ui.notify(`Noodle loop stopped: ${why}`, "info");
 	}
 
-	pi.on("session_shutdown", async () => { disposeAgent?.(); disposeAgent=undefined; if (loop) { loop.ctl.abort(); await loop.done; } manual?.release(); manual = undefined; });
+	pi.on("session_shutdown", async () => { disposeWorkflow?.(); disposeWorkflow=undefined; if (loop) { loop.ctl.abort(); await loop.done; } manual?.release(); manual = undefined; });
 
 	pi.on("agent_settled", async (event) => {
 		if (!manual) return;
@@ -601,23 +647,25 @@ export default function (pi: ExtensionAPI) {
      if(!cfg.adapters?.backlog?.sync && !fs.existsSync(backlog.file)) throw new Error(`Backlog missing: ${backlog.file}. Add tasks before /noodle bg.`);
      const items=(await backlog.items()).filter(i=>!i.done);
      if(!items.length) throw new Error('No open backlog items; no subagent launched.');
-     const available=ctx.modelRegistry?.getAvailable();
-     if(!available) throw new Error('Available model registry is required before background launch.');
-     const implementation=cfg.routing?.['noodle-execute'] ?? cfg.routing?.default;
-     const reviewer=cfg.routing?.['noodle-review'];
-     if(!implementation || !reviewer) throw new Error('Configure routing.default (or noodle-execute) and routing.noodle-review in .noodle.json.');
-     const implementationId=resolveModelIdentity(implementation,available);
-     const reviewerId=resolveModelIdentity(reviewer,available);
-     if(implementationId===reviewerId) throw new Error('Review must use a different model than implementation; no subagent launched.');
-     for(const model of Object.values(cfg.routing ?? {})) resolveModelIdentity(model,available);
-     disposeAgent?.();
-     const request:any={version:1,name:'noodle-loop',definition:{description:'Native Noodle skill coordinator',systemPrompt:'Coordinate only through native subagent tools. Never spawn standalone pi or /noodle loop. Read supplied skill files and preserve approval boundaries. Return evidence to parent.',tools:['read','bash','subagent']}};
-     pi.events.emit('pi-subagents:runtime-agent-register:v1',request);
-     if(!request.result?.ok) throw new Error('pi-subagents runtime registration unavailable; load pi-subagents before /noodle bg.');
-     disposeAgent=()=>request.result.registration.dispose();
-     const result=await subagentRpc(pi,'spawn',{agent:'noodle-loop',cwd:ctx.cwd,task:coordinatorTask(PKG,ctx.cwd,count,parallel,rest.includes('--merge')),async:true});
-     ctx.ui.notify(typeof result?.text==='string' ? result.text : 'Noodle launched via pi-subagents; use native subagent status and controls.','info');
+     if(!disposeWorkflow) throw new Error('Native workflow resource is not registered for this session; reload Pi and check pi-subagents.');
+     if(rest.includes('--merge')) throw new Error('Native automatic merge remains disabled until structural review/phase attestation is implemented; inspect branches and merge explicitly.');
+     if(items.length!==1) throw new Error('Native structural workflow currently supports exactly one open item per launch; split the backlog or use the standalone loop.');
+     const item=items[0];safeId(item.id);
+     if(!(await git(ctx.cwd,'rev-parse','HEAD')).out.trim()) throw new Error('Repository needs a base commit.');
+     const requestId=randomUUID();
+     const owner=new NativeOwnership(ctx.cwd);
+     const lease=await owner.acquire(ctx.sessionManager?.getSessionId?.() ?? 'unknown',[item.id],requestId);
+     try {
+      nativeRuns.set(requestId,{owner,lease,ctx});
+      const result=await subagentRpc(pi,'spawn',{workflow:'noodle.item',args:workflowArgs(PKG,ctx.cwd,item),cwd:ctx.cwd,async:true},requestId);
+      const runId=result?.details?.runId ?? result?.details?.workflowRunId ?? requestId;
+      if(typeof runId!=='string'){nativeRuns.delete(requestId);owner.save({...lease,status:'uncertain'});throw new Error('Native launch reply lacks run ID; ownership retained. Inspect native status, do not relaunch.');}
+      nativeRuns.delete(requestId);lease.runId=runId;lease.status='running';owner.save(lease);nativeRuns.set(runId,{owner,lease,ctx});
+      const completed=earlyCompletions.get(runId);if(completed){earlyCompletions.delete(runId);finalizeNative(runId,completed.asyncDir).catch(e=>ctx.ui.notify(`Native finalize failed; ownership retained: ${e}`,'error'));}
+      ctx.ui.notify(typeof result?.text==='string' ? result.text : 'Native Noodle workflow launched; repository ownership remains until observed workflow termination proof.','info');
+     }catch(e){owner.save({...lease,status:'uncertain'});throw e;}
      return;
+
     }
     if (cmd === "jobs") {
      const result=await subagentRpc(pi,'status',rest[0]?{id:rest[0]}:{});

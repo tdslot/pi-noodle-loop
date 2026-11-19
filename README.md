@@ -58,11 +58,17 @@ pi --no-extensions -e ./pi-noodle --skill ./pi-noodle/skills
 
 ## Native background delegation
 
-`/noodle bg 4 --parallel 2` first requires a Git repository root, an existing local or adapter backlog with open tasks, and configured available distinct implementation/review models. Missing requirements reject launch before native registration; no task/config files are created automatically. Subdirectories and `~` are not inferred or redirected to another repository. It uses pi-subagents' public runtime-agent registration and event-bus spawn API. It requires pi-subagents loaded in the parent Pi session. No separate Noodle job registry, polling loop, fleet implementation or process dashboard is installed. If native launch fails or its reply is lost, inspect native status; do not redispatch blindly and never fall back to an unmanaged process.
+`/noodle bg 4 --parallel 2` first requires a Git repository root, an existing local or adapter backlog with open tasks, and `pi-subagents` agents `worker` and `reviewer` (their models are configured there). Missing requirements reject launch before native registration; no task/config files are created automatically. Subdirectories and `~` are not inferred or redirected to another repository. It uses pi-subagents' public runtime-agent registration and event-bus spawn API. It requires pi-subagents loaded in the parent Pi session. No separate Noodle job registry, polling loop, fleet implementation or process dashboard is installed. If native launch fails or its reply is lost, inspect native status; do not redispatch blindly and never fall back to an unmanaged process.
 
 The native `noodle-loop` coordinator reads the Noodle skills and delegates bounded stages through native subagent calls. It never starts another standalone Pi CLI loop. Its run lifecycle and child-stage evidence belong to pi-subagents; this path does not claim the standalone `/noodle loop` journal/recovery guarantees. Pi's existing subagent TUI shows its task/tool/activity; native completion delivers results to the original parent so it can continue. Use normal subagent status, transcript, stop and interrupt controls for that native run. `/noodle jobs` delegates to the same native status API. `/noodle status` still describes the current repository only.
 
-Background delegation explicitly authorizes unattended stage selection (`--auto`), but local merging remains opt-in with `--merge`; no pushes. Session ownership, output, run retention and wake policy belong to pi-subagents. Noodle still owns its repository-specific execution/checkpoint policy, not an independent background-job manager.
+Background delegation explicitly authorizes unattended stage selection (`--auto`). Native `--merge` is currently rejected: structural phase/review attestation is not implemented yet. Inspect branches and use an explicitly approved manual merge; no pushes. Session ownership, output, run retention and wake policy belong to pi-subagents. Noodle still owns its repository-specific execution/checkpoint policy, not an independent background-job manager.
+
+### Native ownership and verified results
+
+Native launch acquires the same `.noodle/owner.lock` as standalone mutation paths before spawning. Another session cannot launch against that repository. Ownership is released only after the workflow's terminal proof: `dispatchClosed` plus observed process-terminal proof for both children (implementation and review). Unknown, missing or mismatched proof, or failed Git verification, retains the lock; inspect before removing it manually.
+
+On observed termination, Noodle checks the launch integration commit, authorized `noodle/<item-id>` branches and worktree cleanliness, writes `.noodle/native-result-<token>.json`, and appends Git evidence to parent context. Test and reviewer claims remain native output, not structurally verified attestations; this check never authorizes merge. Automatic descendant-proof reconciliation and unlock, including after reload, remain future work. This release deliberately fails closed: inspect every native descendant and confirm it has stopped before manually removing a retained lock.
 
 ## Recovery
 
@@ -73,6 +79,8 @@ Merge intent is saved before Git. If the recorded commit is already in the recor
 Recovery is bound to the original destination fingerprint. Set `NOODLE_GH_REPO=owner/repo` explicitly for GitHub. Custom adapters require a stable `backlogIdentity` in `.noodle.json` (include account/project identifiers, not secrets) and idempotent `done`. Script/config/destination changes block replay; restore the original settings or inspect/migrate state manually. Do not delete journal evidence to force a retry.
 
 ## Routing
+
+`/noodle bg` (native) needs no model config: workers and reviewers use `pi-subagents` agent definitions and defaults (`worker`, `reviewer`). Routing below applies only to the standalone `/noodle start` loop.
 
 Project `.noodle.json` (optional):
 

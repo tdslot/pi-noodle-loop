@@ -1,16 +1,11 @@
 import test from 'node:test';import assert from 'node:assert/strict';
-import {subagentRpc,coordinatorTask} from '../extensions/subagents.ts';
-function bus(){const handlers=new Map();return {on(n,f){handlers.set(n,f);return ()=>handlers.delete(n)},emit(n,v){handlers.get(n)?.(v)}};}
-test('native subagents RPC forwards spawn and returns correlated reply',async()=>{
- const events=bus();events.on('subagents:rpc:v1:request',r=>{assert.equal(r.method,'spawn');assert.equal(r.params.agent,'noodle-loop');events.emit(`subagents:rpc:v1:reply:${r.requestId}`,{success:true,data:{text:'native run started'}})});
- assert.deepEqual(await subagentRpc({events},'spawn',{agent:'noodle-loop'}),{text:'native run started'});
-});
-test('native subagents errors fail closed, never fallback to standalone process',async()=>{
- const events=bus();events.on('subagents:rpc:v1:request',r=>events.emit(`subagents:rpc:v1:reply:${r.requestId}`,{success:false,error:{message:'launch denied'}}));
- await assert.rejects(subagentRpc({events},'spawn',{}),/launch denied/);
-});
-test('native coordinator forbids nested CLI and keeps merge explicit',()=>{
- const task=coordinatorTask('/pkg','/repo',3,2,false);
- assert.match(task,/native subagent calls/);assert.match(task,/no CLI fallback/);assert.match(task,/No merge or push is authorized/);
- assert.match(coordinatorTask('/pkg','/repo',3,1,true),/only after independent PASS/);
-});
+import {subagentRpc,workflowArgs,registerNoodleWorkflowResource} from '../extensions/subagents.ts';import {NOODLE_WORKFLOW} from '../extensions/workflow-template.ts';
+import {workflowTerminalObserved} from '../extensions/native.ts';
+function bus(){const handlers=new Map();return {on(n,f){handlers.set(n,f);return()=>handlers.delete(n)},emit(n,v){handlers.get(n)?.(v)}};}
+test('native RPC correlates replies and fails closed',async()=>{const e=bus();e.on('subagents:rpc:v1:request',r=>e.emit(`subagents:rpc:v1:reply:${r.requestId}`,{success:true,data:{text:'ok'}}));assert.deepEqual(await subagentRpc({events:e},'spawn',{}),{text:'ok'});const f=bus();f.on('subagents:rpc:v1:request',r=>f.emit(`subagents:rpc:v1:reply:${r.requestId}`,{success:false,error:{message:'denied'}}));await assert.rejects(subagentRpc({events:f},'spawn',{}),/denied/)});
+test('workflow keeps task data out of script source; children are awaited in sequence',()=>{const a=workflowArgs('/p','/r',{id:'7',title:'safe`literal',body:'${attack}'});assert.ok(a.implementationTask.includes('${attack}'));assert.ok(!NOODLE_WORKFLOW.includes('attack'));assert.equal((NOODLE_WORKFLOW.match(/runs\.run\(/g)||[]).length,2);assert.ok(!NOODLE_WORKFLOW.includes('async: true'))});
+test('workflow resource exact args and same-session idempotent registration',()=>{const k=Symbol.for('pi-subagents.workflow-resources.v1'),old=globalThis[k];globalThis[k]={version:1,bySession:new Map()};try{const d=registerNoodleWorkflowResource('s');const def=globalThis[k].bySession.get('s').get('noodle.item');const expanded=def.resolve({implementationTask:'x',reviewTask:'y'}).script;assert.ok(!expanded.includes('model'));assert.ok(def.resolve({bad:true}).error);assert.throws(()=>registerNoodleWorkflowResource('s'),/already/);d();assert.equal(globalThis[k].bySession.has('s'),false)}finally{globalThis[k]=old}});
+test('only dispatch-closed workflow proof with all observed child proofs is unlock evidence',()=>{const c=id=>({version:1,runId:id,state:'observed',observedAt:1,instances:[{kind:'runner'}]});const p={version:1,kind:'workflow',runId:'w',state:'observed',dispatchClosed:true,observedAt:2,children:[c('a'),c('b')]};assert.equal(workflowTerminalObserved(p,'w',2),true);for(const b of [{...p,dispatchClosed:false},{...p,state:'unknown'},{...p,children:[c('a')]},{...p,children:[c('a'),{...c('b'),state:'unknown'}]},{...p,runId:'x'}])assert.equal(workflowTerminalObserved(b,'w',2),false)});
+
+test('task text with $ replacement patterns cannot alter script source',()=>{const k=Symbol.for('pi-subagents.workflow-resources.v1'),old=globalThis[k];globalThis[k]={version:1,bySession:new Map()};try{const d=registerNoodleWorkflowResource('s');const def=globalThis[k].bySession.get('s').get('noodle.item');const t="$' $& $` $$ \" ); evil();//";const script=def.resolve({implementationTask:t,reviewTask:t}).script;assert.equal(script.split(JSON.stringify(t)).length-1,2);assert.ok(!script.includes('); evil();//\n'));new Function('runs',`return (async()=>{${script}})`);d()}finally{globalThis[k]=old}});
+test('child proofs must be distinct and not the workflow run',()=>{const c=id=>({version:1,runId:id,state:'observed',observedAt:1,instances:[{kind:'runner'}]});const p={version:1,kind:'workflow',runId:'w',state:'observed',dispatchClosed:true,observedAt:2,children:[c('a'),c('b')]};assert.equal(workflowTerminalObserved({...p,children:[c('a'),c('a')]},'w',2),false);assert.equal(workflowTerminalObserved({...p,children:[c('w'),c('b')]},'w',2),false);assert.equal(workflowTerminalObserved({...p,kind:'x'},'w',2),false)});
