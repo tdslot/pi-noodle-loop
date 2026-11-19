@@ -40,7 +40,7 @@ export function registerNoodleWorkflowResource(sessionId:string):()=>void{
  const definition=Object.freeze({name:'noodle.item',version:1,resolve:(a:Record<string,unknown>)=>{
   const keys=Object.keys(a).sort();
   if(keys.join()!=='implementationTask,reviewTask'||keys.some(k=>typeof a[k]!=='string'||!(a[k] as string).trim())) return {error:'noodle.item args must contain exactly non-empty implementation/review tasks.'};
-  const script=NOODLE_WORKFLOW.replace('"__IMPLEMENTATION_TASK__"',JSON.stringify(a.implementationTask as string)).replace('"__REVIEW_TASK__"',JSON.stringify(a.reviewTask as string));
+  const script=NOODLE_WORKFLOW.replace('"__IMPLEMENTATION_TASK__"',()=>JSON.stringify(a.implementationTask as string)).replace('"__REVIEW_TASK__"',()=>JSON.stringify(a.reviewTask as string));
   return {script};
  }});
  bucket.set('noodle.item',definition);reg.bySession.set(sessionId,bucket);

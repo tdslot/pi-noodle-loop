@@ -376,37 +376,43 @@ export default function (pi: ExtensionAPI) {
 	let mergeChain = Promise.resolve();
  let disposeWorkflow: (()=>void) | undefined;
  pi.on('session_start',async(_e:any,ctx:ExtensionContext)=>{const sid=ctx.sessionManager?.getSessionId?.();if(!sid)return;disposeWorkflow?.();try{disposeWorkflow=registerNoodleWorkflowResource(sid);}catch(e){ctx.ui?.notify?.(`Noodle native workflow unavailable: ${e instanceof Error?e.message:e}`,'warning');}});
- const nativeRuns=new Map<string,{owner:NativeOwnership;lease:import('./native.ts').NativeLease;ctx:ExtensionCommandContext;workflowProof?:any;asyncDir?:string}>();
+ const nativeRuns=new Map<string,{owner:NativeOwnership;lease:import('./native.ts').NativeLease;ctx:ExtensionCommandContext;asyncDir?:string;finalizing?:boolean}>();
  const requestRuns=new Map<string,string>();
- const earlyWorkflowProofs=new Map<string,any>();
  const earlyCompletions=new Map<string,{runId:string;asyncDir?:string}>();
  const finalizeNative=async (runId:string,asyncDir?:string)=>{
-  const tracked=nativeRuns.get(runId);if(!tracked)return;
+  const tracked=nativeRuns.get(runId);if(!tracked||tracked.finalizing)return;
+  tracked.finalizing=true;
   let status:any;
   const dir=asyncDir ?? tracked.asyncDir;
   try{
-   status=(await subagentRpc(pi,'status',{id:runId}))?.details;
+   for(let i=0;i<6;i++){
+    status=(await subagentRpc(pi,'status',{id:runId}))?.details;
+    if(workflowTerminalObserved(status?.workflowTerminalProof,runId,2))break;
+    await new Promise(r=>setTimeout(r,5000));
+   }
+   if(status?.runId!==runId) throw new Error('Native status run ID mismatch');
    if(dir && status?.asyncDir && path.resolve(dir)!==path.resolve(status.asyncDir)) throw new Error('Native status asyncDir mismatch');
    tracked.asyncDir=status?.asyncDir ?? dir;
-  }catch(e){tracked.ctx.ui.notify(`Native status unavailable; ownership retained: ${e}`,'warning');return;}
-  const finalProof=status?.workflowTerminalProof ?? status?.details?.workflowTerminalProof ?? tracked.workflowProof;
+  }catch(e){tracked.ctx.ui.notify(`Native status unavailable; ownership retained: ${e}`,'warning');tracked.finalizing=false;return;}
+  const finalProof=status?.workflowTerminalProof ?? status?.details?.workflowTerminalProof;
   if(!finalProof || !workflowTerminalObserved(finalProof,runId,2)){
    tracked.owner.save({...tracked.lease,status:finalProof?.state==='unknown'?'uncertain':'running'});
-   tracked.ctx.ui.notify(`Native workflow terminal evidence is ${finalProof?.state ?? 'missing'} (dispatchClosed=${finalProof?.dispatchClosed ?? false}); ownership remains retained.`,`warning`);return;
+   tracked.ctx.ui.notify(`Native workflow terminal evidence is ${finalProof?.state ?? 'missing'} (dispatchClosed=${finalProof?.dispatchClosed ?? false}); ownership remains retained.`,`warning`);tracked.finalizing=false;return;
   }
   nativeRuns.delete(runId);
   try{
    const result=await verifyNativeResult(tracked.owner.root,tracked.lease);
+   if(!result.ok){tracked.owner.save({...tracked.lease,status:'terminal'});pi.sendMessage({customType:'noodle-native-evidence',content:`Native workflow ${runId} finished but Git verification failed; ownership retained.\n${result.lines.join('\n')}`,display:true},{triggerTurn:false});tracked.ctx.ui.notify('Native Git verification failed; ownership retained for inspection.','error');return;}
    fs.writeFileSync(path.join(tracked.owner.root,'.noodle',`native-result-${tracked.lease.token}.json`),JSON.stringify({runId,observedAt:finalProof.observedAt,...result},null,2));
    pi.sendMessage({customType:'noodle-native-evidence',content:`Native workflow ${runId} terminated with observed proof for ${finalProof.children.length} children.\n${result.lines.join('\n')}`,display:true},{triggerTurn:false});
    tracked.owner.release(tracked.lease);
    tracked.ctx.ui.notify('Native workflow stopped; repository ownership released.','info');
-  }catch(e){tracked.owner.save({...tracked.lease,status:'terminal'});tracked.ctx.ui.notify(`Native verification failed; ownership retained: ${e}`,'error');}
+  }catch(e){if(tracked.owner.read?.()?.token===tracked.lease.token)tracked.owner.save({...tracked.lease,status:'terminal'});tracked.ctx.ui.notify(`Native verification failed; ownership retained: ${e}`,'error');}
  };
  const noticeNative=(runId:string,asyncDir?:string)=>{
   const tracked=nativeRuns.get(runId) ?? [...nativeRuns.values()].find(x=>x.lease.requestId===runId);
   if(!tracked){earlyCompletions.set(runId,{runId,asyncDir});if(earlyCompletions.size>32)earlyCompletions.delete(earlyCompletions.keys().next().value!);return;}
-  void finalizeNative(tracked.lease.runId ?? runId,asyncDir);
+  finalizeNative(tracked.lease.runId ?? runId,asyncDir).catch(e=>tracked.ctx.ui.notify(`Native finalize failed; ownership retained: ${e}`,'error'));
  };
  pi.events?.on('subagent:async-complete',(payload:any)=>{if(typeof payload?.runId==='string')noticeNative(payload.runId,payload.asyncDir);});
  pi.on('message_end',(event:any)=>{
@@ -655,8 +661,7 @@ export default function (pi: ExtensionAPI) {
       const runId=result?.details?.runId ?? result?.details?.workflowRunId ?? requestId;
       if(typeof runId!=='string'){nativeRuns.delete(requestId);owner.save({...lease,status:'uncertain'});throw new Error('Native launch reply lacks run ID; ownership retained. Inspect native status, do not relaunch.');}
       nativeRuns.delete(requestId);lease.runId=runId;lease.status='running';owner.save(lease);nativeRuns.set(runId,{owner,lease,ctx});
-      const early=earlyWorkflowProofs.get(runId);if(early){earlyWorkflowProofs.delete(runId);const tracked=nativeRuns.get(runId)!;tracked.workflowProof=early;void finalizeNative(runId);}
-      const completed=earlyCompletions.get(runId);if(completed){earlyCompletions.delete(runId);void finalizeNative(runId,completed.asyncDir);}
+      const completed=earlyCompletions.get(runId);if(completed){earlyCompletions.delete(runId);finalizeNative(runId,completed.asyncDir).catch(e=>ctx.ui.notify(`Native finalize failed; ownership retained: ${e}`,'error'));}
       ctx.ui.notify(typeof result?.text==='string' ? result.text : 'Native Noodle workflow launched; repository ownership remains until observed workflow termination proof.','info');
      }catch(e){owner.save({...lease,status:'uncertain'});throw e;}
      return;

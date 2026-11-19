@@ -30,7 +30,7 @@ export class NativeOwnership {
 /** Release proof for a top-level native workflow: dispatch closed AND every roster child has observed process-terminal proof. */
 export function workflowTerminalObserved(proof:any,runId:string,expectedChildren:number):boolean{
  return proof?.version===1&&proof.kind==='workflow'&&proof.runId===runId&&proof.state==='observed'&&proof.dispatchClosed===true&&typeof proof.observedAt==='number'
-  &&Array.isArray(proof.children)&&proof.children.length===expectedChildren&&proof.children.length>0&&proof.children.every((c:any)=>observedTerminal(c,c?.runId));
+  &&Array.isArray(proof.children)&&proof.children.length===expectedChildren&&proof.children.length>0&&proof.children.every((c:any)=>typeof c?.runId==='string'&&c.runId!==runId&&observedTerminal(c,c.runId))&&new Set(proof.children.map((c:any)=>c.runId)).size===proof.children.length;
 }
 export function proofMatchesRun(proof:any,expectedRunId:string):boolean {
  return typeof expectedRunId==='string'&&proof?.runId===expectedRunId;
