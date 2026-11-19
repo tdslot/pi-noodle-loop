@@ -32,8 +32,10 @@
       "./skills"
     ]
   },
-  "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*",
+  "dependencies": {
     "pi-subagents": "*"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
   }
 }
