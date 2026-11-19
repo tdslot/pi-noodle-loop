@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { NOODLE_WORKFLOW } from './workflow-template.ts';
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
+import { registerWorkflowResource } from 'pi-subagents/workflow-resources';
 
 /** Public pi-subagents event RPC; no private registry, process manager, polling or UI. */
 export function subagentRpc(pi: ExtensionAPI, method: string, params: Record<string, unknown>, requestId=randomUUID()): Promise<any> {
@@ -33,22 +34,13 @@ export function workflowArgs(pkg: string, cwd: string, items: NoodleItem[]) {
  return { tasks: JSON.stringify(items.map((i) => itemTasks(pkg, cwd, i))) };
 }
 
-const RESOURCE_KEY='pi-subagents.workflow-resources.v1';
-/** Contract-based registration for separately installed extensions (docs: Symbol.for registry, no Node dependency). */
+/** Register through pi-subagents' public lifecycle API so its registry gets created before recovery. */
 export function registerNoodleWorkflowResource(sessionId:string):()=>void{
- const key=Symbol.for(RESOURCE_KEY);const g=globalThis as any;
- // The documented registry is created lazily by whoever registers first; create the identical v1 shape when absent, reject any other shape.
- const reg:any=g[key] ?? (g[key]={version:1,bySession:new Map()});
- if(reg.version!==1||!(reg.bySession instanceof Map)) throw new Error('Unsupported pi-subagents workflow-resource registry shape; update Noodle or pi-subagents.');
- const bucket:Map<string,unknown>=reg.bySession.get(sessionId) ?? new Map();
- if(bucket.has('noodle.item')) throw new Error('noodle.item workflow resource already registered for this session.');
- const definition=Object.freeze({name:'noodle.item',version:1,resolve:(a:Record<string,unknown>)=>{
+ const registration=registerWorkflowResource({sessionId,definition:{name:'noodle.item',version:1,resolve:(a:Record<string,unknown>)=>{
   let tasks:any;try{tasks=JSON.parse(a.tasks as string);}catch{/* rejected below */}
   if(Object.keys(a).join()!=='tasks'||!Array.isArray(tasks)||tasks.length<1||tasks.length>MAX_NATIVE_ITEMS||tasks.some((t:any)=>typeof t?.impl!=='string'||!t.impl.trim()||typeof t?.review!=='string'||!t.review.trim()||Object.keys(t).length!==2)) return {error:'noodle.item args must be {tasks} with 1-'+MAX_NATIVE_ITEMS+' non-empty impl/review pairs.'};
   const script=NOODLE_WORKFLOW.replace('"__TASKS__"',()=>JSON.stringify(tasks));
   return {script};
- }});
- bucket.set('noodle.item',definition);reg.bySession.set(sessionId,bucket);
- let done=false;
- return()=>{if(done)return;done=true;if(bucket.get('noodle.item')===definition)bucket.delete('noodle.item');if(bucket.size===0&&reg.bySession.get(sessionId)===bucket)reg.bySession.delete(sessionId);};
+ }}});
+ return ()=>registration.dispose();
 }

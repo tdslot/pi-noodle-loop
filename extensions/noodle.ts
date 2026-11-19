@@ -375,7 +375,8 @@ export default function (pi: ExtensionAPI) {
 	let manual: { skill: string; id: string; root: string; release: () => void } | undefined;
 	let mergeChain = Promise.resolve();
  let disposeWorkflow: (()=>void) | undefined;
- pi.on('session_start',async(_e:any,ctx:ExtensionContext)=>{const sid=ctx.sessionManager?.getSessionId?.();if(!sid)return;disposeWorkflow?.();try{disposeWorkflow=registerNoodleWorkflowResource(sid);}catch(e){ctx.ui?.notify?.(`Noodle native workflow unavailable: ${e instanceof Error?e.message:e}`,'warning');}
+ const registerWorkflowForSession=(ctx:ExtensionContext)=>{const sid=ctx.sessionManager?.getSessionId?.();if(!sid)return;const next=registerNoodleWorkflowResource(sid);const previous=disposeWorkflow;disposeWorkflow=next;previous?.();};
+ pi.on('session_start',async(_e:any,ctx:ExtensionContext)=>{try{registerWorkflowForSession(ctx);}catch(e){ctx.ui?.notify?.(`Noodle native workflow unavailable: ${e instanceof Error?e.message:e}`,'warning');return;}
   // Reconcile an earlier native launch (e.g. Pi restarted): finalize only through the same terminal-proof gate.
   try{
    const owner=new NativeOwnership(ctx.cwd);const lease=owner.read();
