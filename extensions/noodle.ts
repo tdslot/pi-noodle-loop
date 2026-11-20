@@ -17,6 +17,8 @@
 
 import { createHash } from "node:crypto";
 import { Journal } from "./state.ts";
+import { modelIdentity, resolveModelIdentity, nativeModels } from "./models.ts";
+export { modelIdentity, resolveModelIdentity, nativeModels } from "./models.ts";
 import { NativeOwnership, workflowTerminalObserved, verifyNativeResult } from "./native.ts";
 import { randomUUID } from "node:crypto";
 import { subagentRpc, workflowArgs, registerNoodleWorkflowResource, MAX_NATIVE_ITEMS } from "./subagents.ts";
@@ -101,16 +103,6 @@ export function nextDirectives(text: string): Next[] | null {
 	const all = [...text.matchAll(re)];
 	if (!all.length) return null;
 	return all.filter((m) => m[1].toLowerCase() !== "idle").map((m) => ({ skill: m[2], id: m[3], ...(m[4] && { model: m[4] }) }));
-}
-
-export const modelIdentity = (model: string) => model.replace(/:(off|minimal|low|medium|high|xhigh|max)$/, "");
-export function resolveModelIdentity(spec: string, models: readonly { provider: string; id: string }[]): string {
- // Match Pi precedence: literal IDs may themselves end in a thinking-level suffix.
- const exact = models.filter(m => `${m.provider}/${m.id}` === spec || m.id === spec);
- const id = modelIdentity(spec);
- const matches = exact.length ? exact : models.filter(m => `${m.provider}/${m.id}` === id || m.id === id);
- if (matches.length !== 1) throw new Error(`Use an unambiguous available model ID, not a fuzzy alias: ${spec}`);
- return `${matches[0].provider}/${matches[0].id}`;
 }
 
 export const verdict = (text: string) => [...text.matchAll(/^\s*NOODLE_VERDICT:\s*(PASS|CONTESTED|REJECT)\s*$/gm)].at(-1)?.[1];
@@ -375,7 +367,7 @@ export default function (pi: ExtensionAPI) {
 	let manual: { skill: string; id: string; root: string; release: () => void } | undefined;
 	let mergeChain = Promise.resolve();
  let disposeWorkflow: (()=>void) | undefined;
- const registerWorkflowForSession=(ctx:ExtensionContext)=>{const sid=ctx.sessionManager?.getSessionId?.();if(!sid)return;const next=registerNoodleWorkflowResource(sid);const previous=disposeWorkflow;disposeWorkflow=next;previous?.();};
+ const registerWorkflowForSession=(ctx:ExtensionContext)=>{const sid=ctx.sessionManager?.getSessionId?.();if(!sid)return;const next=registerNoodleWorkflowResource(sid,()=>ctx.modelRegistry?.getAvailable());const previous=disposeWorkflow;disposeWorkflow=next;previous?.();};
  pi.on('session_start',async(_e:any,ctx:ExtensionContext)=>{try{registerWorkflowForSession(ctx);}catch(e){ctx.ui?.notify?.(`Noodle native workflow unavailable: ${e instanceof Error?e.message:e}`,'warning');return;}
   // Reconcile an earlier native launch (e.g. Pi restarted): finalize only through the same terminal-proof gate.
   try{
@@ -669,6 +661,7 @@ export default function (pi: ExtensionAPI) {
      if(!items.length) throw new Error('No open backlog items; no subagent launched.');
      if(!disposeWorkflow) throw new Error('Native workflow resource is not registered for this session; reload Pi and check pi-subagents.');
      if(rest.includes('--merge')) throw new Error('Native automatic merge remains disabled until structural review/phase attestation is implemented; inspect branches and merge explicitly.');
+     const models=nativeModels(cfg.routing ?? {},ctx.model,ctx.modelRegistry?.getAvailable());
      const batch=items.slice(0,count);
      if(items.length>batch.length) ctx.ui.notify(`${items.length} open items; launching first ${batch.length}. Run again for the rest.`,'info');
      for(const i of batch) safeId(i.id);
@@ -678,7 +671,7 @@ export default function (pi: ExtensionAPI) {
      const lease=await owner.acquire(ctx.sessionManager?.getSessionId?.() ?? 'unknown',batch.map(i=>i.id),requestId);
      try {
       nativeRuns.set(requestId,{owner,lease,ctx});
-      const result=await subagentRpc(pi,'spawn',{workflow:'noodle.item',args:workflowArgs(PKG,ctx.cwd,batch),cwd:ctx.cwd,async:true},requestId);
+      const result=await subagentRpc(pi,'spawn',{workflow:'noodle.item',args:workflowArgs(PKG,ctx.cwd,batch,models),cwd:ctx.cwd,async:true},requestId);
       const runId=result?.details?.runId ?? result?.details?.workflowRunId ?? requestId;
       if(typeof runId!=='string'){nativeRuns.delete(requestId);owner.save({...lease,status:'uncertain'});throw new Error('Native launch reply lacks run ID; ownership retained. Inspect native status, do not relaunch.');}
       lease.runId=runId;lease.status='running';owner.save(lease);
